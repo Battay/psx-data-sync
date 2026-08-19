@@ -9,7 +9,7 @@ import re
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 from .client import AsyncPSXClient, PSXClient, PSXClientError
@@ -18,6 +18,7 @@ from .exporter import inspect_existing_canonical_file, save_canonical_csv
 from .parser import classify_html, parse_equity_rows
 from .state import (
     ContentClassification,
+    DownloadAttemptEvent,
     DownloadResult,
     DownloadStatus,
     FetchResponse,
@@ -28,6 +29,14 @@ from .validator import validate_rows
 
 logger = logging.getLogger(__name__)
 ISO_DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+SyncPreflight = Callable[[date], DownloadResult | None]
+AsyncPreflight = Callable[[date], Awaitable[DownloadResult | None]]
+SyncAttemptObserver = Callable[[DownloadAttemptEvent], None]
+AsyncAttemptObserver = Callable[[DownloadAttemptEvent], Awaitable[None]]
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
 def validate_requested_date(value: str, *, today: date | None = None) -> date:
@@ -140,6 +149,43 @@ class _BaseSingleDateDownloader:
             completed.elapsed_ms,
         )
         return completed
+
+    @staticmethod
+    def _attempt_event(
+        context: _DownloadContext,
+        *,
+        attempt_started_at: str,
+        attempt_started_perf: float,
+        classification: ContentClassification | None,
+        final_status: DownloadStatus,
+        retryable: bool,
+        error_type: str | None = None,
+        error_message: str | None = None,
+        result: DownloadResult | None = None,
+        worker_identifier: str | None = None,
+    ) -> DownloadAttemptEvent:
+        return DownloadAttemptEvent(
+            requested_date=context.requested_date,
+            attempt_number=context.attempts,
+            started_at=attempt_started_at,
+            finished_at=_utc_now_iso(),
+            duration_ms=(time.perf_counter() - attempt_started_perf) * 1000,
+            http_status=context.http_status,
+            response_bytes=context.response_bytes,
+            response_classification=(
+                None if classification is None else classification.value
+            ),
+            final_status=final_status,
+            retryable=retryable,
+            error_type=error_type,
+            error_message=error_message,
+            parsed_row_count=0 if result is None else result.parsed_row_count,
+            valid_row_count=0 if result is None else result.valid_row_count,
+            rejected_row_count=0 if result is None else result.rejected_row_count,
+            checksum=None if result is None else result.checksum,
+            saved_path=None if result is None else result.saved_path,
+            worker_identifier=worker_identifier,
+        )
 
     def _record_client_error(
         self, context: _DownloadContext, error: PSXClientError
@@ -312,10 +358,14 @@ class SingleDateDownloader(_BaseSingleDateDownloader):
         *,
         sleep: Callable[[float], None] = time.sleep,
         random_value: Callable[[], float] = random.random,
+        preflight: SyncPreflight | None = None,
+        attempt_observer: SyncAttemptObserver | None = None,
     ) -> None:
         super().__init__(settings, random_value=random_value)
         self.client = client
         self._sleep = sleep
+        self._preflight = preflight
+        self._attempt_observer = attempt_observer
 
     def _backoff(
         self,
@@ -331,21 +381,48 @@ class SingleDateDownloader(_BaseSingleDateDownloader):
         if delay > 0:
             self._sleep(delay)
 
-    def download(self, requested_date: str) -> DownloadResult:
+    def download(
+        self, requested_date: str, *, worker_identifier: str | None = None
+    ) -> DownloadResult:
         context = _DownloadContext(requested_date=requested_date)
         try:
             parsed_date = validate_requested_date(requested_date)
         except ValueError as exc:
             return self._finish(context, DownloadStatus.INVALID_DATE, error=str(exc))
 
+        if self._preflight is not None:
+            local_result = self._preflight(parsed_date)
+            if local_result is not None:
+                return local_result
+
         for attempt in range(1, self.settings.retry_attempts + 1):
             context.attempts = attempt
+            attempt_started_at = _utc_now_iso()
             fetch_started = time.perf_counter()
             try:
                 response = self.client.fetch(parsed_date)
             except PSXClientError as exc:
                 context.network_ms += (time.perf_counter() - fetch_started) * 1000
                 self._record_client_error(context, exc)
+                attempt_status = (
+                    DownloadStatus.HTTP_FAILURE
+                    if exc.kind.value == "HTTP"
+                    else DownloadStatus.TEMPORARY_FAILURE
+                )
+                if self._attempt_observer is not None:
+                    self._attempt_observer(
+                        self._attempt_event(
+                            context,
+                            attempt_started_at=attempt_started_at,
+                            attempt_started_perf=fetch_started,
+                            classification=None,
+                            final_status=attempt_status,
+                            retryable=exc.retryable,
+                            error_type=exc.kind.value,
+                            error_message=str(exc),
+                            worker_identifier=worker_identifier,
+                        )
+                    )
                 if exc.retryable and attempt < self.settings.retry_attempts:
                     context.warnings.append(
                         f"attempt {attempt} failed: {exc}; retried"
@@ -362,8 +439,48 @@ class SingleDateDownloader(_BaseSingleDateDownloader):
             context.network_ms += (time.perf_counter() - fetch_started) * 1000
             classification = self._classify_response(context, response)
             if classification is ContentClassification.EQUITY_ROWS:
-                return self._process_equity_content(
+                completed = self._process_equity_content(
                     context, parsed_date, response.content
+                )
+                if self._attempt_observer is not None:
+                    self._attempt_observer(
+                        self._attempt_event(
+                            context,
+                            attempt_started_at=attempt_started_at,
+                            attempt_started_perf=fetch_started,
+                            classification=classification,
+                            final_status=completed.status,
+                            retryable=False,
+                            error_type=(
+                                None if completed.successful else completed.status.value
+                            ),
+                            error_message=completed.error,
+                            result=completed,
+                            worker_identifier=worker_identifier,
+                        )
+                    )
+                return completed
+            content_status = (
+                DownloadStatus.EMPTY_MARKET_RESPONSE
+                if classification is ContentClassification.EMPTY_MARKET_RESPONSE
+                else DownloadStatus.PARSE_FAILURE
+            )
+            if self._attempt_observer is not None:
+                self._attempt_observer(
+                    self._attempt_event(
+                        context,
+                        attempt_started_at=attempt_started_at,
+                        attempt_started_perf=fetch_started,
+                        classification=classification,
+                        final_status=content_status,
+                        retryable=True,
+                        error_type=classification.value,
+                        error_message=(
+                            "response content was empty or unexpected and was "
+                            "eligible for retry"
+                        ),
+                        worker_identifier=worker_identifier,
+                    )
                 )
             if attempt < self.settings.retry_attempts:
                 description = classification.value.lower().replace("_", " ")
@@ -392,11 +509,15 @@ class AsyncSingleDateDownloader(_BaseSingleDateDownloader):
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         random_value: Callable[[], float] = random.random,
         short_circuit_existing: bool = True,
+        preflight: AsyncPreflight | None = None,
+        attempt_observer: AsyncAttemptObserver | None = None,
     ) -> None:
         super().__init__(settings, random_value=random_value)
         self.client = client
         self._sleep = sleep
         self.short_circuit_existing = short_circuit_existing
+        self._preflight = preflight
+        self._attempt_observer = attempt_observer
 
     async def _backoff(
         self,
@@ -412,14 +533,20 @@ class AsyncSingleDateDownloader(_BaseSingleDateDownloader):
         if delay > 0:
             await self._sleep(delay)
 
-    async def download(self, requested_date: str) -> DownloadResult:
+    async def download(
+        self, requested_date: str, *, worker_identifier: str | None = None
+    ) -> DownloadResult:
         context = _DownloadContext(requested_date=requested_date)
         try:
             parsed_date = validate_requested_date(requested_date)
         except ValueError as exc:
             return self._finish(context, DownloadStatus.INVALID_DATE, error=str(exc))
 
-        if self.short_circuit_existing:
+        if self._preflight is not None:
+            local_result = await self._preflight(parsed_date)
+            if local_result is not None:
+                return local_result
+        elif self.short_circuit_existing:
             inspection = inspect_existing_canonical_file(
                 parsed_date,
                 self.settings.raw_output_dir,
@@ -446,12 +573,49 @@ class AsyncSingleDateDownloader(_BaseSingleDateDownloader):
 
         for attempt in range(1, self.settings.retry_attempts + 1):
             context.attempts = attempt
+            attempt_started_at = _utc_now_iso()
             fetch_started = time.perf_counter()
             try:
                 response = await self.client.fetch(parsed_date)
+            except asyncio.CancelledError:
+                context.network_ms += (time.perf_counter() - fetch_started) * 1000
+                if self._attempt_observer is not None:
+                    await self._attempt_observer(
+                        self._attempt_event(
+                            context,
+                            attempt_started_at=attempt_started_at,
+                            attempt_started_perf=fetch_started,
+                            classification=None,
+                            final_status=DownloadStatus.TEMPORARY_FAILURE,
+                            retryable=True,
+                            error_type="CANCELLED",
+                            error_message="network attempt interrupted by cancellation",
+                            worker_identifier=worker_identifier,
+                        )
+                    )
+                raise
             except PSXClientError as exc:
                 context.network_ms += (time.perf_counter() - fetch_started) * 1000
                 self._record_client_error(context, exc)
+                attempt_status = (
+                    DownloadStatus.HTTP_FAILURE
+                    if exc.kind.value == "HTTP"
+                    else DownloadStatus.TEMPORARY_FAILURE
+                )
+                if self._attempt_observer is not None:
+                    await self._attempt_observer(
+                        self._attempt_event(
+                            context,
+                            attempt_started_at=attempt_started_at,
+                            attempt_started_perf=fetch_started,
+                            classification=None,
+                            final_status=attempt_status,
+                            retryable=exc.retryable,
+                            error_type=exc.kind.value,
+                            error_message=str(exc),
+                            worker_identifier=worker_identifier,
+                        )
+                    )
                 if exc.retryable and attempt < self.settings.retry_attempts:
                     context.warnings.append(
                         f"attempt {attempt} failed: {exc}; retried"
@@ -468,8 +632,48 @@ class AsyncSingleDateDownloader(_BaseSingleDateDownloader):
             context.network_ms += (time.perf_counter() - fetch_started) * 1000
             classification = self._classify_response(context, response)
             if classification is ContentClassification.EQUITY_ROWS:
-                return self._process_equity_content(
+                completed = self._process_equity_content(
                     context, parsed_date, response.content
+                )
+                if self._attempt_observer is not None:
+                    await self._attempt_observer(
+                        self._attempt_event(
+                            context,
+                            attempt_started_at=attempt_started_at,
+                            attempt_started_perf=fetch_started,
+                            classification=classification,
+                            final_status=completed.status,
+                            retryable=False,
+                            error_type=(
+                                None if completed.successful else completed.status.value
+                            ),
+                            error_message=completed.error,
+                            result=completed,
+                            worker_identifier=worker_identifier,
+                        )
+                    )
+                return completed
+            content_status = (
+                DownloadStatus.EMPTY_MARKET_RESPONSE
+                if classification is ContentClassification.EMPTY_MARKET_RESPONSE
+                else DownloadStatus.PARSE_FAILURE
+            )
+            if self._attempt_observer is not None:
+                await self._attempt_observer(
+                    self._attempt_event(
+                        context,
+                        attempt_started_at=attempt_started_at,
+                        attempt_started_perf=fetch_started,
+                        classification=classification,
+                        final_status=content_status,
+                        retryable=True,
+                        error_type=classification.value,
+                        error_message=(
+                            "response content was empty or unexpected and was "
+                            "eligible for retry"
+                        ),
+                        worker_identifier=worker_identifier,
+                    )
                 )
             if attempt < self.settings.retry_attempts:
                 description = classification.value.lower().replace("_", " ")

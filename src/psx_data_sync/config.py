@@ -79,8 +79,9 @@ class Settings:
     range_workers: int = DEFAULT_RANGE_WORKERS
     max_range_workers: int = MAX_RANGE_WORKERS
     large_range_warning_days: int = 365
-    user_agent: str = "psx-data-sync/0.1 (+https://dps.psx.com.pk/)"
+    user_agent: str = "psx-data-sync/0.3 (+https://dps.psx.com.pk/)"
     raw_output_dir: Path = Path("data/raw")
+    state_db_path: Path = Path("data/state/psx_sync.db")
     canonical_columns: tuple[str, ...] = CANONICAL_COLUMNS
 
     @classmethod
@@ -148,5 +149,8 @@ class Settings:
             user_agent=values.get("PSX_USER_AGENT", defaults.user_agent),
             raw_output_dir=Path(
                 values.get("PSX_RAW_OUTPUT_DIR", str(defaults.raw_output_dir))
+            ).expanduser(),
+            state_db_path=Path(
+                values.get("PSX_STATE_DB_PATH", str(defaults.state_db_path))
             ).expanduser(),
         )

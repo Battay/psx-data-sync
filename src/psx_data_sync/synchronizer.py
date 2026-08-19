@@ -15,6 +15,7 @@ from .config import MAX_RANGE_WORKERS, MIN_RANGE_WORKERS, Settings
 from .downloader import AsyncSingleDateDownloader, validate_requested_date
 from .state import (
     BenchmarkMetrics,
+    DownloadAttemptEvent,
     DownloadResult,
     DownloadStatus,
     RangeDownloadResult,
@@ -23,6 +24,9 @@ from .state import (
 
 logger = logging.getLogger(__name__)
 ProgressCallback = Callable[[DownloadResult, int, int], None]
+AsyncPreflight = Callable[[date], Awaitable[DownloadResult | None]]
+AsyncAttemptObserver = Callable[[DownloadAttemptEvent], Awaitable[None]]
+AsyncResultObserver = Callable[[DownloadResult], Awaitable[None]]
 
 FAILURE_STATUSES = frozenset(
     {
@@ -175,17 +179,23 @@ class ConcurrentRangeDownloader:
         progress_callback: ProgressCallback | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         random_value: Callable[[], float] = random.random,
+        preflight: AsyncPreflight | None = None,
+        attempt_observer: AsyncAttemptObserver | None = None,
+        result_observer: AsyncResultObserver | None = None,
     ) -> None:
         self.settings = settings
         self.client = client
         self.workers = validate_workers(workers, settings)
         self.progress_callback = progress_callback
+        self.result_observer = result_observer
         self._date_downloader = AsyncSingleDateDownloader(
             settings,
             client,
             sleep=sleep,
             random_value=random_value,
             short_circuit_existing=True,
+            preflight=preflight,
+            attempt_observer=attempt_observer,
         )
 
     async def download_range(
@@ -239,12 +249,15 @@ class ConcurrentRangeDownloader:
                 )
                 try:
                     outcome = await self._date_downloader.download(
-                        requested_date.isoformat()
+                        requested_date.isoformat(),
+                        worker_identifier=f"worker-{worker_number}",
                     )
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
                     outcome = _unexpected_failure(requested_date, exc)
+                if self.result_observer is not None:
+                    await self.result_observer(outcome)
                 outcomes[requested_date.isoformat()] = outcome
                 completed += 1
                 logger.info(
@@ -294,6 +307,9 @@ async def fetch_date_range(
     workers: int | None = None,
     progress_callback: ProgressCallback | None = None,
     client: AsyncPSXClient | None = None,
+    preflight: AsyncPreflight | None = None,
+    attempt_observer: AsyncAttemptObserver | None = None,
+    result_observer: AsyncResultObserver | None = None,
 ) -> RangeDownloadResult:
     """Own the pooled client lifetime, including cancellation cleanup."""
 
@@ -312,6 +328,9 @@ async def fetch_date_range(
             pooled_client,
             workers=resolved_workers,
             progress_callback=progress_callback,
+            preflight=preflight,
+            attempt_observer=attempt_observer,
+            result_observer=result_observer,
         )
         return await downloader.download_dates(requested_dates)
 

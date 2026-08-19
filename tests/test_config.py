@@ -16,6 +16,7 @@ def test_defaults_resolve_correctly() -> None:
     assert settings.historical_url == "https://dps.psx.com.pk/historical"
     assert settings.retry_attempts == 3
     assert settings.raw_output_dir == Path("data/raw")
+    assert settings.state_db_path == Path("data/state/psx_sync.db")
     assert settings.canonical_columns == CANONICAL_COLUMNS
     assert settings.range_workers == DEFAULT_RANGE_WORKERS == 4
     assert settings.max_range_workers == MAX_RANGE_WORKERS == 16
@@ -27,6 +28,7 @@ def test_environment_overrides_are_typed(tmp_path: Path) -> None:
             "PSX_RETRY_ATTEMPTS": "5",
             "PSX_REQUEST_TIMEOUT_SECONDS": "12.5",
             "PSX_RAW_OUTPUT_DIR": str(tmp_path),
+            "PSX_STATE_DB_PATH": str(tmp_path / "sync.db"),
             "PSX_RANGE_WORKERS": "2",
         }
     )
@@ -34,6 +36,7 @@ def test_environment_overrides_are_typed(tmp_path: Path) -> None:
     assert settings.retry_attempts == 5
     assert settings.request_timeout_seconds == 12.5
     assert settings.raw_output_dir == tmp_path
+    assert settings.state_db_path == tmp_path / "sync.db"
     assert settings.range_workers == 2
 
 

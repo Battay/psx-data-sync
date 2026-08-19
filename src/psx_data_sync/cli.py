@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import sqlite3
 import time
+from dataclasses import replace
+from datetime import date
 from pathlib import Path
 from typing import Annotated
 
@@ -21,8 +25,15 @@ from rich.table import Table
 
 from .client import PSXClient
 from .config import MAX_RANGE_WORKERS, Settings
-from .downloader import SingleDateDownloader
-from .state import DownloadResult, DownloadStatus, RangeDownloadResult
+from .downloader import SingleDateDownloader, validate_requested_date
+from .state import (
+    DownloadResult,
+    DownloadStatus,
+    PersistentSyncStatus,
+    RangeDownloadResult,
+    StateSummary,
+)
+from .state_db import AsyncStateRepository, StateDatabaseError, StateRepository
 from .synchronizer import (
     fetch_date_range,
     generate_date_range,
@@ -36,6 +47,7 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 console = Console()
+logger = logging.getLogger(__name__)
 
 
 @app.callback()
@@ -44,9 +56,62 @@ def main() -> None:
 
 
 def run_download(requested_date: str) -> DownloadResult:
+    try:
+        parsed_date = validate_requested_date(requested_date)
+    except ValueError as exc:
+        return DownloadResult(
+            requested_date=requested_date,
+            status=DownloadStatus.INVALID_DATE,
+            error=str(exc),
+        )
+
     settings = Settings.from_env()
-    with PSXClient(settings) as client:
-        return SingleDateDownloader(settings, client).download(requested_date)
+    repository = StateRepository(
+        settings.state_db_path,
+        source_endpoint=settings.historical_url,
+    )
+    repository.initialize()
+    run_id = repository.begin_sync_run(
+        "fetch",
+        parsed_date.isoformat(),
+        parsed_date.isoformat(),
+        1,
+        1,
+    )
+    started = time.perf_counter()
+    try:
+        with PSXClient(settings) as client:
+            downloader = SingleDateDownloader(
+                settings,
+                client,
+                preflight=lambda day: repository.prepare_fetch(
+                    day,
+                    settings.raw_output_dir,
+                    settings.canonical_columns,
+                ),
+                attempt_observer=lambda event: repository.record_attempt(
+                    run_id, event
+                ),
+            )
+            result = downloader.download(
+                requested_date, worker_identifier="single-date"
+            )
+        repository.record_download_result(run_id, result)
+        repository.finish_sync_run(
+            run_id,
+            duration_ms=(time.perf_counter() - started) * 1000,
+        )
+        return result
+    except BaseException:
+        try:
+            repository.finish_sync_run(
+                run_id,
+                interrupted=True,
+                duration_ms=(time.perf_counter() - started) * 1000,
+            )
+        except Exception:
+            logger.exception("failed to mark single-date sync run interrupted")
+        raise
 
 
 def run_range_download(
@@ -58,15 +123,57 @@ def run_range_download(
     progress_callback=None,
 ) -> RangeDownloadResult:
     resolved_settings = settings or Settings.from_env()
-    return asyncio.run(
-        fetch_date_range(
+    requested_dates = generate_date_range(start_date, end_date)
+    repository = StateRepository(
+        resolved_settings.state_db_path,
+        source_endpoint=resolved_settings.historical_url,
+    )
+    repository.initialize()
+    run_id = repository.begin_sync_run(
+        "fetch-range",
+        start_date,
+        end_date,
+        len(requested_dates),
+        workers,
+    )
+    started = time.perf_counter()
+
+    async def execute() -> RangeDownloadResult:
+        state = AsyncStateRepository(repository)
+        return await fetch_date_range(
             resolved_settings,
             start_date,
             end_date,
             workers=workers,
             progress_callback=progress_callback,
+            preflight=lambda day: state.prepare_fetch(
+                day,
+                resolved_settings.raw_output_dir,
+                resolved_settings.canonical_columns,
+            ),
+            attempt_observer=lambda event: state.record_attempt(run_id, event),
+            result_observer=lambda result: state.record_download_result(
+                run_id, result
+            ),
         )
-    )
+
+    try:
+        result = asyncio.run(execute())
+        repository.finish_sync_run(
+            run_id,
+            duration_ms=(time.perf_counter() - started) * 1000,
+        )
+        return replace(result, run_id=run_id)
+    except BaseException:
+        try:
+            repository.finish_sync_run(
+                run_id,
+                interrupted=True,
+                duration_ms=(time.perf_counter() - started) * 1000,
+            )
+        except Exception:
+            logger.exception("failed to mark range sync run interrupted")
+        raise
 
 
 def _human_bytes(size: int) -> str:
@@ -157,11 +264,13 @@ def render_range_result(result: RangeDownloadResult, output_dir: Path) -> None:
     )
     summary.add_row("Rows throughput:", f"{result.rows_per_second:,.1f} rows/s")
     summary.add_row("Output:", str(output_dir))
+    if result.run_id:
+        summary.add_row("Run ID:", result.run_id)
     console.print(summary)
 
     outcomes = Table(title="Per-date outcomes", show_lines=False)
     outcomes.add_column("Date")
-    outcomes.add_column("Status")
+    outcomes.add_column("Status", no_wrap=True)
     outcomes.add_column("Attempts", justify="right")
     outcomes.add_column("Valid rows", justify="right")
     outcomes.add_column("Detail")
@@ -207,7 +316,7 @@ def fetch_command(
 
     try:
         result = run_download(requested_date)
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, sqlite3.Error, StateDatabaseError) as exc:
         console.print(f"[bold red]Configuration error:[/bold red] {exc}")
         raise typer.Exit(code=1) from exc
     render_result(result)
@@ -323,7 +432,7 @@ def fetch_range_command(
                 "atomic files remain valid; the shared HTTP client was closed."
             )
             raise typer.Exit(code=130) from exc
-        except (OSError, ValueError) as exc:
+        except (OSError, ValueError, sqlite3.Error, StateDatabaseError) as exc:
             console.print(f"[bold red]Range error:[/bold red] {exc}")
             raise typer.Exit(code=1) from exc
 
@@ -332,6 +441,201 @@ def fetch_range_command(
         raise typer.Exit(code=1)
     if result.has_unresolved_empty:
         raise typer.Exit(code=3)
+
+
+def _repository_from_settings(settings: Settings) -> StateRepository:
+    repository = StateRepository(
+        settings.state_db_path,
+        source_endpoint=settings.historical_url,
+    )
+    repository.initialize()
+    return repository
+
+
+@app.command("state-bootstrap")
+def state_bootstrap_command() -> None:
+    """Index existing canonical CSV files without making network requests."""
+
+    try:
+        settings = Settings.from_env()
+        repository = _repository_from_settings(settings)
+        result = repository.bootstrap_local_files(settings.raw_output_dir)
+    except (OSError, ValueError, sqlite3.Error, StateDatabaseError) as exc:
+        console.print(f"[bold red]Bootstrap error:[/bold red] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    console.print("[bold]PSX Data Sync — Local State Bootstrap[/bold]\n")
+    table = Table.grid(padding=(0, 2))
+    table.add_column(style="bold")
+    table.add_column(justify="right")
+    table.add_row("Database:", str(settings.state_db_path))
+    table.add_row("Discovered files:", str(result.discovered_files))
+    table.add_row("Newly indexed:", str(result.indexed_files))
+    table.add_row("Already indexed:", str(result.unchanged_files))
+    table.add_row("Invalid files:", str(result.invalid_files))
+    console.print(table)
+
+    if result.files:
+        details = Table(title="Local artifacts")
+        details.add_column("Date")
+        details.add_column("Status", no_wrap=True)
+        details.add_column("Rows", justify="right")
+        details.add_column("SHA-256")
+        details.add_column("File")
+        for item in result.files:
+            details.add_row(
+                item.market_date or "—",
+                item.status.value,
+                f"{item.row_count:,}",
+                item.checksum or "—",
+                str(item.path),
+            )
+        console.print("\n", details)
+    if result.invalid_files:
+        raise typer.Exit(code=1)
+
+
+def _render_state_summary(summary: StateSummary, *, heading: str) -> None:
+    console.print(f"[bold]{heading}[/bold]\n")
+    table = Table.grid(padding=(0, 2))
+    table.add_column(style="bold")
+    table.add_column(justify="right")
+    table.add_row("Database:", str(summary.database_path))
+    table.add_row("Tracked dates:", f"{summary.tracked_dates:,}")
+    for status in PersistentSyncStatus:
+        if status is PersistentSyncStatus.NEVER_ATTEMPTED:
+            continue
+        table.add_row(
+            status.value.replace("_", " ").title() + ":",
+            f"{summary.counts_by_status.get(status, 0):,}",
+        )
+    table.add_row("Earliest tracked:", summary.earliest_tracked or "—")
+    table.add_row("Latest tracked:", summary.latest_tracked or "—")
+    table.add_row("Last successful sync:", summary.last_successful_sync or "—")
+    console.print(table)
+
+
+@app.command("status")
+def status_command(
+    requested_date: Annotated[
+        str | None,
+        typer.Option("--date", "-d", help="Inspect one tracked ISO date."),
+    ] = None,
+    start_date: Annotated[
+        str | None,
+        typer.Option("--start", "-s", help="Inclusive summary start date."),
+    ] = None,
+    end_date: Annotated[
+        str | None,
+        typer.Option("--end", "-e", help="Inclusive summary end date."),
+    ] = None,
+) -> None:
+    """Inspect persistent synchronization state without network access."""
+
+    if requested_date is not None and (start_date is not None or end_date is not None):
+        console.print(
+            "[bold red]Input error:[/bold red] --date cannot be combined with a range"
+        )
+        raise typer.Exit(code=2)
+    if (start_date is None) != (end_date is None):
+        console.print(
+            "[bold red]Input error:[/bold red] --start and --end are required together"
+        )
+        raise typer.Exit(code=2)
+
+    try:
+        if requested_date is not None:
+            validate_requested_date(requested_date, today=date.max)
+        elif start_date is not None and end_date is not None:
+            generate_date_range(start_date, end_date, today=date.max)
+    except ValueError as exc:
+        console.print(f"[bold red]Input error:[/bold red] {exc}")
+        raise typer.Exit(code=2) from exc
+
+    try:
+        settings = Settings.from_env()
+        repository = _repository_from_settings(settings)
+        state = (
+            repository.get_date_state(requested_date)
+            if requested_date is not None
+            else None
+        )
+        attempts = (
+            repository.get_recent_attempts(requested_date)
+            if requested_date is not None
+            else ()
+        )
+        summary = (
+            repository.summarize_range(
+                start_date=start_date,
+                end_date=end_date,
+            )
+            if requested_date is None
+            else None
+        )
+    except (OSError, ValueError, sqlite3.Error, StateDatabaseError) as exc:
+        console.print(f"[bold red]State error:[/bold red] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    if requested_date is not None:
+        console.print("[bold]PSX Data Sync — Date State[/bold]\n")
+        if state is None:
+            console.print(f"Date: {requested_date}\nStatus: NEVER_ATTEMPTED")
+            return
+        table = Table.grid(padding=(0, 2))
+        table.add_column(style="bold")
+        table.add_column()
+        table.add_row("Date:", state.market_date)
+        table.add_row("Status:", state.status.value)
+        table.add_row("Evidence:", state.evidence_state)
+        table.add_row("Lifetime attempts:", str(state.attempt_count))
+        table.add_row("Successful attempts:", str(state.successful_attempt_count))
+        table.add_row("Last HTTP:", str(state.last_http_status or "—"))
+        table.add_row(
+            "Parsed/valid/rejected:",
+            (
+                f"{state.parsed_row_count}/{state.valid_row_count}/"
+                f"{state.rejected_row_count}"
+            ),
+        )
+        table.add_row("SHA-256:", state.csv_checksum_sha256 or "—")
+        table.add_row("CSV:", state.csv_relative_path or "—")
+        table.add_row("First attempt:", state.first_attempt_at or "—")
+        table.add_row("Last attempt:", state.last_attempt_at or "—")
+        table.add_row("Last success:", state.last_success_at or "—")
+        table.add_row("Last verified:", state.last_verified_at or "—")
+        table.add_row(
+            "Last error:",
+            (
+                f"{state.last_error_type}: {state.last_error_message}"
+                if state.last_error_type and state.last_error_message
+                else state.last_error_message or state.last_error_type or "—"
+            ),
+        )
+        console.print(table)
+        if attempts:
+            history = Table(title="Recent network attempts")
+            history.add_column("Run")
+            history.add_column("Attempt", justify="right")
+            history.add_column("HTTP")
+            history.add_column("Classification")
+            history.add_column("Result")
+            for attempt in attempts:
+                history.add_row(
+                    attempt.run_id[:8],
+                    str(attempt.attempt_number),
+                    str(attempt.http_status or "—"),
+                    attempt.response_classification or "—",
+                    attempt.final_status,
+                )
+            console.print("\n", history)
+        return
+
+    assert summary is not None
+    heading = "PSX Data Sync — State Summary"
+    if start_date is not None and end_date is not None:
+        heading += f" ({start_date} → {end_date})"
+    _render_state_summary(summary, heading=heading)
 
 
 if __name__ == "__main__":

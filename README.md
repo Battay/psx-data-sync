@@ -2,10 +2,10 @@
 
 PSX Data Sync is a standalone Python application for downloading historical
 Pakistan Stock Exchange equity data from the official PSX data portal. Milestone
-D1 provides a reliable single-date core, and Milestone D2 adds bounded concurrent
-downloads for inclusive date ranges.
+D1 provides a reliable single-date core, D2 adds bounded concurrent downloads,
+and D3 adds durable, resumable synchronization metadata in SQLite.
 
-## Current capability: D1 and D2
+## Current capability: D1 through D3
 
 The D1 pipeline:
 
@@ -88,15 +88,78 @@ outcomes and aggregate counts, retries, bytes, rows, duration, and throughput.
 One date's timeout, server error, malformed response, or unresolved empty table
 does not discard other dates' results.
 
-Before a range worker contacts PSX, it validates any existing canonical file for
-that date and recalculates its SHA-256 checksum. A strictly canonical file is
-reported as `ALREADY_PRESENT` with zero HTTP attempts. Invalid or noncanonical
-files are never overwritten. The single-date `fetch` command retains D1 behavior
-and still contacts PSX before comparing downloaded content.
+Before either fetch command contacts PSX, it checks persistent state and validates
+the local canonical file, including its SHA-256 checksum. A matching verified
+file is reported as `ALREADY_PRESENT` with zero HTTP attempts. Dates with
+unresolved empty responses or temporary, HTTP, parse, and validation failures
+remain eligible for later retry.
 
 Ranges longer than 365 dates are allowed for automation but produce a warning.
-Persistent multi-year backfill state and reconciliation belong to later
-milestones.
+Full multi-year backfill and reconciliation belong to later milestones.
+
+## Persistent synchronization state
+
+Synchronization metadata is stored by default in
+`data/state/psx_sync.db`. CSV files remain the canonical market-data artifacts;
+SQLite stores only status, attempt and run history, HTTP/result metadata, row
+counts, checksums, relative file paths, timestamps, and concise errors. It does
+not duplicate OHLCV observations.
+
+The version-1 schema uses WAL mode, foreign keys, and full synchronous writes.
+Network work remains concurrent, while each short SQLite operation uses its own
+connection and asynchronous range writes pass through one lock and worker
+thread. This avoids sharing connections across tasks or blocking the event loop.
+
+The conservative persistent states are:
+
+- `VERIFIED_TRADING_DATA` and `ALREADY_PRESENT_VERIFIED`;
+- `EMPTY_UNRESOLVED`;
+- `TEMPORARY_FAILURE`, `HTTP_FAILURE`, `PARSE_FAILURE`, and
+  `VALIDATION_FAILURE`;
+- `FILE_MISSING`, `FILE_CORRUPT`, and `FILE_CONFLICT`;
+- `NEVER_ATTEMPTED` for a newly created state row.
+
+An empty PSX response is always `EMPTY_UNRESOLVED` in persistent state. D3 never
+declares a permanent holiday or non-trading day; that requires D4 reconciliation
+evidence.
+
+### Index existing CSV files
+
+After installing D3, index existing canonical files without any network calls:
+
+```bash
+python -m psx_data_sync.cli state-bootstrap
+```
+
+Bootstrap scans `data/raw/market_YYYY-MM-DD.csv`, validates canonical content,
+counts rows, and computes SHA-256. It is idempotent: repeated runs do not increase
+attempt counters or create audit attempts. Invalid files are reported and left
+untouched.
+
+### Inspect state
+
+```bash
+python -m psx_data_sync.cli status
+python -m psx_data_sync.cli status --date 2026-08-05
+python -m psx_data_sync.cli status --start 2026-08-01 --end 2026-08-31
+```
+
+These commands never contact PSX. The date view includes lifetime attempts,
+row counts, checksum, relative CSV path, timestamps, the last error, and recent
+network attempts.
+
+### Resume and artifact consistency
+
+Each `fetch` and `fetch-range` invocation gets a durable run identity. Completed
+date results are committed as workers finish. If a range is interrupted, its run
+is marked `INTERRUPTED`; the next invocation verifies and locally skips completed
+dates, then retries only the missing or unresolved work.
+
+If state says a CSV was verified but it is now missing, the date is marked
+`FILE_MISSING` and network recovery is allowed. A malformed file becomes
+`FILE_CORRUPT`. A valid canonical file whose checksum differs from the last
+verified checksum becomes `FILE_CONFLICT`. Corrupt and conflicting files are
+never overwritten or deleted automatically.
 
 ## Canonical output
 
@@ -147,6 +210,7 @@ Defaults work without a `.env` file. Straightforward overrides are available:
 - `PSX_LARGE_RANGE_WARNING_DAYS`
 - `PSX_USER_AGENT`
 - `PSX_RAW_OUTPUT_DIR`
+- `PSX_STATE_DB_PATH`
 
 ## Tests
 
@@ -166,8 +230,8 @@ local-file skips do not distort later measurements.
 ## Roadmap
 
 - D1: single-date core — done
-- D2: concurrent date-range downloader — done, pending acceptance
-- D3: synchronization state
+- D2: concurrent date-range downloader — done
+- D3: persistent synchronization state — done
 - D4: reconciliation and repair
 - D5: Parquet export workflow
 - D6: graphical interface
