@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+data/raw/*
+!data/raw/.gitkeep
+
+data/parquet/*
+!data/parquet/.gitkeep
+
+data/state/*
+!data/state/.gitkeep
+
+.env
+.DS_Store
