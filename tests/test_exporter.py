@@ -6,7 +6,11 @@ from pathlib import Path
 
 import psx_data_sync.exporter as exporter
 import pytest
-from psx_data_sync.exporter import canonical_csv_bytes, save_canonical_csv
+from psx_data_sync.exporter import (
+    canonical_csv_bytes,
+    inspect_existing_canonical_file,
+    save_canonical_csv,
+)
 from psx_data_sync.parser import parse_equity_rows
 from psx_data_sync.state import SaveStatus
 from psx_data_sync.validator import validate_rows
@@ -93,3 +97,31 @@ def test_empty_data_is_never_saved(tmp_path: Path) -> None:
         save_canonical_csv([], REQUESTED_DATE, tmp_path)
 
     assert not list(tmp_path.glob("*.csv"))
+
+
+def test_existing_canonical_file_inspection(tmp_path: Path, fixture_bytes) -> None:
+    created = save_canonical_csv(
+        valid_rows(fixture_bytes), REQUESTED_DATE, tmp_path
+    )
+
+    inspection = inspect_existing_canonical_file(REQUESTED_DATE, tmp_path)
+
+    assert inspection.exists and inspection.valid
+    assert inspection.row_count == 3
+    assert inspection.checksum == created.checksum
+
+
+def test_noncanonical_valid_csv_cannot_be_locally_skipped(
+    tmp_path: Path, fixture_bytes
+) -> None:
+    created = save_canonical_csv(
+        valid_rows(fixture_bytes), REQUESTED_DATE, tmp_path
+    )
+    content = created.path.read_text(encoding="utf-8")
+    created.path.write_text(content.replace("AAA,100,", "AAA,100.0,"), encoding="utf-8")
+
+    inspection = inspect_existing_canonical_file(REQUESTED_DATE, tmp_path)
+
+    assert inspection.exists
+    assert not inspection.valid
+    assert "not canonical" in (inspection.error or "")

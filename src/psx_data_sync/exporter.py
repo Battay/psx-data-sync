@@ -14,7 +14,12 @@ from pathlib import Path
 
 from .config import CANONICAL_COLUMNS
 from .parser import parse_field_values
-from .state import SaveResult, SaveStatus, ValidEquityRow
+from .state import (
+    ExistingFileInspection,
+    SaveResult,
+    SaveStatus,
+    ValidEquityRow,
+)
 from .validator import validate_rows
 
 
@@ -55,28 +60,27 @@ def sha256_bytes(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
 
 
-def validate_existing_csv(
+def _validated_existing_rows(
     content: bytes,
     columns: Sequence[str] = CANONICAL_COLUMNS,
-) -> tuple[bool, str | None]:
-    """Validate schema and every row of an existing canonical candidate."""
+) -> tuple[tuple[ValidEquityRow, ...] | None, str | None]:
 
     try:
         text = content.decode("utf-8")
     except UnicodeDecodeError:
-        return False, "existing file is not valid UTF-8"
+        return None, "existing file is not valid UTF-8"
 
     try:
         records = list(csv.reader(io.StringIO(text, newline="")))
     except csv.Error as exc:
-        return False, f"existing file is not valid CSV: {exc}"
+        return None, f"existing file is not valid CSV: {exc}"
 
     if not records:
-        return False, "existing file is empty"
+        return None, "existing file is empty"
     if tuple(records[0]) != tuple(columns):
-        return False, "existing file has a non-canonical header"
+        return None, "existing file has a non-canonical header"
     if len(records) == 1:
-        return False, "existing file contains no data rows"
+        return None, "existing file contains no data rows"
 
     parsed_rows = tuple(
         parse_field_values(record, row_index)
@@ -86,11 +90,67 @@ def validate_existing_csv(
     if validation.rejected_rows:
         first = validation.rejected_rows[0]
         return (
-            False,
+            None,
             f"existing file row {first.row_index} is invalid: "
             + "; ".join(first.reasons),
         )
-    return True, None
+    return validation.valid_rows, None
+
+
+def validate_existing_csv(
+    content: bytes,
+    columns: Sequence[str] = CANONICAL_COLUMNS,
+) -> tuple[bool, str | None]:
+    """Validate schema and every row of an existing canonical candidate."""
+
+    rows, error = _validated_existing_rows(content, columns)
+    return rows is not None, error
+
+
+def inspect_existing_canonical_file(
+    requested_date: date,
+    output_dir: Path,
+    columns: Sequence[str] = CANONICAL_COLUMNS,
+) -> ExistingFileInspection:
+    """Validate and checksum a local D1 file for a network-free D2 skip."""
+
+    path = output_dir / f"market_{requested_date.isoformat()}.csv"
+    if not path.exists():
+        return ExistingFileInspection(path=path, exists=False, valid=False)
+    try:
+        content = path.read_bytes()
+    except OSError as exc:
+        return ExistingFileInspection(
+            path=path,
+            exists=True,
+            valid=False,
+            error=f"existing file cannot be read: {exc}",
+        )
+
+    rows, error = _validated_existing_rows(content, columns)
+    if rows is None:
+        return ExistingFileInspection(
+            path=path,
+            exists=True,
+            valid=False,
+            error=error,
+        )
+    if canonical_csv_bytes(rows, columns) != content:
+        return ExistingFileInspection(
+            path=path,
+            exists=True,
+            valid=False,
+            row_count=len(rows),
+            checksum=sha256_bytes(content),
+            error="existing file is valid CSV but not canonical deterministic content",
+        )
+    return ExistingFileInspection(
+        path=path,
+        exists=True,
+        valid=True,
+        row_count=len(rows),
+        checksum=sha256_bytes(content),
+    )
 
 
 def _atomic_write(path: Path, content: bytes) -> None:

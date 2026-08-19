@@ -1,4 +1,4 @@
-"""Domain types shared by the D1 download pipeline."""
+"""Domain types shared by the D1 and D2 download pipelines."""
 
 from __future__ import annotations
 
@@ -109,6 +109,7 @@ class DownloadResult:
     http_status: int | None = None
     attempts: int = 0
     response_bytes: int = 0
+    cumulative_response_bytes: int = 0
     parsed_row_count: int = 0
     valid_row_count: int = 0
     rejected_row_count: int = 0
@@ -119,6 +120,8 @@ class DownloadResult:
     save_ms: float = 0.0
     saved_path: Path | None = None
     checksum: str | None = None
+    rate_limit_count: int = 0
+    locally_skipped: bool = False
     warnings: tuple[str, ...] = ()
     error: str | None = None
 
@@ -128,3 +131,73 @@ class DownloadResult:
             DownloadStatus.TRADING_DATA,
             DownloadStatus.ALREADY_PRESENT,
         }
+
+    @property
+    def transferred_response_bytes(self) -> int:
+        """Include every HTTP attempt while preserving the D1 final-size field."""
+
+        return self.cumulative_response_bytes or self.response_bytes
+
+
+@dataclass(frozen=True, slots=True)
+class ExistingFileInspection:
+    path: Path
+    exists: bool
+    valid: bool
+    row_count: int = 0
+    checksum: str | None = None
+    error: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RangeDownloadResult:
+    start_date: str
+    end_date: str
+    requested_dates: tuple[str, ...]
+    workers: int
+    total_duration_ms: float
+    results: tuple[DownloadResult, ...]
+    counts_by_status: dict[DownloadStatus, int]
+    total_parsed_rows: int
+    total_valid_rows: int
+    total_rejected_rows: int
+    total_response_bytes: int
+    total_retries: int
+    rate_limit_occurrences: int
+    network_fetched_dates: int
+    locally_skipped_dates: int
+    verified_successful_dates: int
+    failed_dates: tuple[str, ...]
+    unresolved_empty_dates: tuple[str, ...]
+    average_per_date_duration_ms: float
+    dates_per_second: float
+    verified_dates_per_second: float
+    network_dates_per_second: float
+    rows_per_second: float
+    warnings: tuple[str, ...] = ()
+
+    @property
+    def requested_count(self) -> int:
+        return len(self.requested_dates)
+
+    @property
+    def has_failures(self) -> bool:
+        return bool(self.failed_dates)
+
+    @property
+    def has_unresolved_empty(self) -> bool:
+        return bool(self.unresolved_empty_dates)
+
+
+@dataclass(frozen=True, slots=True)
+class BenchmarkMetrics:
+    workers: int
+    requested_dates: int
+    total_duration_ms: float
+    dates_per_second: float
+    verified_dates_per_second: float
+    network_dates_per_second: float
+    rows_per_second: float
+    retries: int
+    failures: int
+    response_bytes: int

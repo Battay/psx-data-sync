@@ -1,4 +1,4 @@
-"""Typed configuration for the PSX single-date downloader."""
+"""Typed configuration for the PSX single-date and range downloaders."""
 
 from __future__ import annotations
 
@@ -19,6 +19,9 @@ CANONICAL_COLUMNS: tuple[str, ...] = (
     "change_percent",
     "volume",
 )
+MIN_RANGE_WORKERS = 1
+DEFAULT_RANGE_WORKERS = 4
+MAX_RANGE_WORKERS = 16
 
 
 def _positive_float(values: Mapping[str, str], name: str, default: float) -> float:
@@ -73,6 +76,9 @@ class Settings:
     retry_backoff_initial_seconds: float = 1.0
     retry_backoff_max_seconds: float = 8.0
     retry_jitter_fraction: float = 0.25
+    range_workers: int = DEFAULT_RANGE_WORKERS
+    max_range_workers: int = MAX_RANGE_WORKERS
+    large_range_warning_days: int = 365
     user_agent: str = "psx-data-sync/0.1 (+https://dps.psx.com.pk/)"
     raw_output_dir: Path = Path("data/raw")
     canonical_columns: tuple[str, ...] = CANONICAL_COLUMNS
@@ -92,6 +98,23 @@ class Settings:
         )
         if jitter > 1:
             raise ValueError("PSX_RETRY_JITTER_FRACTION cannot exceed 1")
+
+        max_range_workers = _positive_int(
+            values, "PSX_MAX_RANGE_WORKERS", defaults.max_range_workers
+        )
+        if max_range_workers > MAX_RANGE_WORKERS:
+            raise ValueError(
+                f"PSX_MAX_RANGE_WORKERS cannot exceed {MAX_RANGE_WORKERS}"
+            )
+        range_workers = _positive_int(
+            values,
+            "PSX_RANGE_WORKERS",
+            min(defaults.range_workers, max_range_workers),
+        )
+        if range_workers > max_range_workers:
+            raise ValueError(
+                "PSX_RANGE_WORKERS cannot exceed PSX_MAX_RANGE_WORKERS"
+            )
 
         return cls(
             historical_url=historical_url,
@@ -115,6 +138,13 @@ class Settings:
                 defaults.retry_backoff_max_seconds,
             ),
             retry_jitter_fraction=jitter,
+            range_workers=range_workers,
+            max_range_workers=max_range_workers,
+            large_range_warning_days=_positive_int(
+                values,
+                "PSX_LARGE_RANGE_WARNING_DAYS",
+                defaults.large_range_warning_days,
+            ),
             user_agent=values.get("PSX_USER_AGENT", defaults.user_agent),
             raw_output_dir=Path(
                 values.get("PSX_RAW_OUTPUT_DIR", str(defaults.raw_output_dir))
