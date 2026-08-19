@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import sqlite3
 import time
-from dataclasses import replace
+from collections.abc import Mapping
+from dataclasses import fields, is_dataclass, replace
 from datetime import date
+from enum import Enum
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
 from rich.console import Console
@@ -31,6 +34,7 @@ from .state import (
     DownloadStatus,
     PersistentSyncStatus,
     RangeDownloadResult,
+    ReconciliationRangeResult,
     StateSummary,
 )
 from .state_db import AsyncStateRepository, StateDatabaseError, StateRepository
@@ -176,6 +180,39 @@ def run_range_download(
         raise
 
 
+def run_reconciliation(
+    start_date: str,
+    end_date: str,
+    workers: int,
+    *,
+    apply: bool = False,
+    force_recheck: bool = False,
+    settings: Settings | None = None,
+) -> ReconciliationRangeResult:
+    """Run the D4 service while keeping orchestration out of the CLI command."""
+
+    resolved_settings = settings or Settings.from_env()
+    repository = StateRepository(
+        resolved_settings.state_db_path,
+        source_endpoint=resolved_settings.historical_url,
+    )
+    repository.initialize()
+
+    # Imported lazily so the D1-D3 commands remain usable independently of the
+    # reconciliation orchestration module during installation and migration.
+    from .reconciliation import run_reconciliation as execute_reconciliation
+
+    return execute_reconciliation(
+        resolved_settings,
+        repository,
+        start_date,
+        end_date,
+        apply=apply,
+        force_recheck=force_recheck,
+        workers=workers,
+    )
+
+
 def _human_bytes(size: int) -> str:
     if size < 1024:
         return f"{size} B"
@@ -242,6 +279,10 @@ def render_range_result(result: RangeDownloadResult, output_dir: Path) -> None:
         "Already present:",
         f"{counts.get(DownloadStatus.ALREADY_PRESENT, 0):,}",
     )
+    summary.add_row(
+        "Confirmed non-trading:",
+        f"{counts.get(DownloadStatus.CONFIRMED_NON_TRADING, 0):,}",
+    )
     summary.add_row("Empty/unresolved:", f"{empty_count:,}")
     summary.add_row("Failures:", f"{len(result.failed_dates):,}")
     summary.add_row("Network-fetched dates:", f"{result.network_fetched_dates:,}")
@@ -300,6 +341,218 @@ def render_range_result(result: RangeDownloadResult, output_dir: Path) -> None:
         console.print(f"[yellow]Warning:[/yellow] {warning}")
 
 
+def _json_value(value: Any) -> Any:
+    """Convert result dataclasses into deterministic JSON-compatible values."""
+
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, Path):
+        return str(value)
+    if is_dataclass(value) and not isinstance(value, type):
+        return {
+            field.name: _json_value(getattr(value, field.name))
+            for field in fields(value)
+        }
+    if isinstance(value, Mapping):
+        return {
+            str(_json_value(key)): _json_value(item)
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+        }
+    if isinstance(value, (tuple, list)):
+        return [_json_value(item) for item in value]
+    return value
+
+
+def _filtered_reconciliation_results(
+    result: ReconciliationRangeResult,
+    *,
+    only_problems: bool,
+    status: PersistentSyncStatus | None,
+) -> tuple:
+    """Filter displayed dates without changing whole-range summary semantics."""
+
+    return tuple(
+        item
+        for item in result.results
+        if (not only_problems or item.has_problem)
+        and (status is None or item.reconciled_status is status)
+    )
+
+
+def reconciliation_result_to_dict(
+    result: ReconciliationRangeResult,
+    *,
+    only_problems: bool = False,
+    status: PersistentSyncStatus | None = None,
+) -> dict[str, Any]:
+    """Build the stable machine-readable reconciliation report."""
+
+    displayed = _filtered_reconciliation_results(
+        result,
+        only_problems=only_problems,
+        status=status,
+    )
+    date_results: list[dict[str, Any]] = []
+    for item in displayed:
+        serialized = _json_value(item)
+        assert isinstance(serialized, dict)
+        serialized.pop("state_snapshot_exists", None)
+        serialized.pop("state_record_updated_at", None)
+        serialized["resolved"] = item.resolved
+        serialized["has_problem"] = item.has_problem
+        date_results.append(serialized)
+
+    return {
+        "report_schema_version": 1,
+        "run_id": result.run_id,
+        "range": {
+            "start_date": result.start_date,
+            "end_date": result.end_date,
+            "requested_date_count": len(result.requested_dates),
+            "displayed_date_count": len(displayed),
+        },
+        "mode": result.mode.value,
+        "policy_version": result.policy_version,
+        "complete": result.complete,
+        "resolution_percentage": result.resolution_percentage,
+        "summary": {
+            "counts_by_status": _json_value(result.counts_by_status),
+            "counts_by_action": _json_value(result.counts_by_action),
+            "verified_count": result.verified_count,
+            "confirmed_non_trading_count": result.confirmed_non_trading_count,
+            "never_attempted_count": result.never_attempted_count,
+            "unresolved_count": result.unresolved_count,
+            "failure_count": result.failure_count,
+            "file_health_issue_count": result.file_health_issue_count,
+            "network_recheck_planned_count": (
+                result.network_recheck_planned_count
+            ),
+            "network_recheck_eligible_count": sum(
+                item.network_recheck_required and item.recheck_eligible_now
+                for item in result.results
+            ),
+            "network_recheck_count": result.network_recheck_count,
+            "local_repair_count": result.local_repair_count,
+            "local_repair_remaining_count": result.local_repair_count,
+            "manual_review_count": result.manual_review_count,
+            "status_transition_count": result.status_transition_count,
+        },
+        "activity": {
+            "network_rechecked_dates": list(result.network_rechecked_dates),
+            "staged_repair_dates": list(result.staged_repair_dates),
+            "promoted_repair_dates": list(result.promoted_repair_dates),
+            "duration_ms": result.duration_ms,
+        },
+        "filters": {
+            "only_problems": only_problems,
+            "status": status.value if status is not None else None,
+        },
+        "results": date_results,
+        "warnings": list(result.warnings),
+    }
+
+
+def render_reconciliation_result(
+    result: ReconciliationRangeResult,
+    *,
+    only_problems: bool = False,
+    status: PersistentSyncStatus | None = None,
+) -> None:
+    """Render a concise whole-range summary and filtered date-level plan."""
+
+    displayed = _filtered_reconciliation_results(
+        result,
+        only_problems=only_problems,
+        status=status,
+    )
+    console.print("[bold]PSX Data Sync — Reconciliation[/bold]")
+    console.print(f"Range: {result.start_date} → {result.end_date}")
+    console.print(f"Mode: {result.mode.value.replace('_', ' ')}")
+    console.print(f"Policy: {result.policy_version}")
+    console.print(f"Run ID: {result.run_id}\n")
+
+    summary = Table.grid(padding=(0, 2))
+    summary.add_column(style="bold")
+    summary.add_column(justify="right")
+    summary.add_row("Verified trading:", f"{result.verified_count:,}")
+    summary.add_row(
+        "Confirmed non-trading:",
+        f"{result.confirmed_non_trading_count:,}",
+    )
+    summary.add_row("Never attempted:", f"{result.never_attempted_count:,}")
+    summary.add_row("Unresolved:", f"{result.unresolved_count:,}")
+    summary.add_row("Failures:", f"{result.failure_count:,}")
+    summary.add_row("File health issues:", f"{result.file_health_issue_count:,}")
+    summary.add_row(
+        "Network rechecks required:",
+        f"{result.network_recheck_planned_count:,}",
+    )
+    summary.add_row(
+        "Network rechecks eligible now:",
+        f"{sum(item.network_recheck_required and item.recheck_eligible_now for item in result.results):,}",
+    )
+    summary.add_row(
+        "Network rechecks performed:",
+        f"{result.network_recheck_count:,}",
+    )
+    summary.add_row(
+        "Local repairs remaining:", f"{result.local_repair_count:,}"
+    )
+    summary.add_row("Manual review:", f"{result.manual_review_count:,}")
+    summary.add_row("Status transitions:", f"{result.status_transition_count:,}")
+    summary.add_row(
+        "Completeness:",
+        (
+            f"{'COMPLETE' if result.complete else 'INCOMPLETE'} "
+            f"({result.resolution_percentage:.2f}%)"
+        ),
+    )
+    console.print(summary)
+
+    if only_problems or status is not None:
+        filters: list[str] = []
+        if only_problems:
+            filters.append("problems only")
+        if status is not None:
+            filters.append(f"status={status.value}")
+        console.print(
+            "\n[dim]Displayed dates filtered by " + ", ".join(filters) + ".[/dim]"
+        )
+
+    if displayed:
+        outcomes = Table(title="Date-level reconciliation plan", show_lines=False)
+        outcomes.add_column("Date", no_wrap=True)
+        outcomes.add_column("Previous", no_wrap=True)
+        outcomes.add_column("Reconciled", no_wrap=True)
+        outcomes.add_column("File", no_wrap=True)
+        outcomes.add_column("Checksum", no_wrap=True)
+        outcomes.add_column("Action", no_wrap=True)
+        outcomes.add_column("Recheck", no_wrap=True)
+        outcomes.add_column("Reason")
+        for item in displayed:
+            if item.network_recheck_required:
+                recheck = "eligible" if item.recheck_eligible_now else "cooldown"
+            else:
+                recheck = "—"
+            detail = "; ".join(item.reasons) or "; ".join(item.warnings) or "—"
+            outcomes.add_row(
+                item.market_date,
+                item.previous_status.value,
+                item.reconciled_status.value,
+                item.file_state.value,
+                item.checksum_state.value,
+                item.action_required.value,
+                recheck,
+                detail,
+            )
+        console.print("\n", outcomes)
+    else:
+        console.print("\nNo dates match the selected display filters.")
+
+    for warning in result.warnings:
+        console.print(f"[yellow]Warning:[/yellow] {warning}")
+
+
 @app.command("fetch")
 def fetch_command(
     requested_date: Annotated[
@@ -320,7 +573,7 @@ def fetch_command(
         console.print(f"[bold red]Configuration error:[/bold red] {exc}")
         raise typer.Exit(code=1) from exc
     render_result(result)
-    if result.successful:
+    if result.successful or result.status is DownloadStatus.CONFIRMED_NON_TRADING:
         return
     if result.status is DownloadStatus.INVALID_DATE:
         raise typer.Exit(code=2)
@@ -440,6 +693,168 @@ def fetch_range_command(
     if result.has_failures:
         raise typer.Exit(code=1)
     if result.has_unresolved_empty:
+        raise typer.Exit(code=3)
+
+
+def _render_reconcile_error(
+    category: str,
+    message: str,
+    *,
+    json_output: bool,
+) -> None:
+    if json_output:
+        typer.echo(
+            json.dumps(
+                {"category": category, "error": message},
+                sort_keys=True,
+            )
+        )
+        return
+    console.print(f"[bold red]{category}:[/bold red] {message}")
+
+
+@app.command("reconcile")
+def reconcile_command(
+    start_date: Annotated[
+        str,
+        typer.Option(
+            "--start",
+            "-s",
+            help="Inclusive first date in YYYY-MM-DD format.",
+            metavar="YYYY-MM-DD",
+        ),
+    ],
+    end_date: Annotated[
+        str,
+        typer.Option(
+            "--end",
+            "-e",
+            help="Inclusive final date in YYYY-MM-DD format.",
+            metavar="YYYY-MM-DD",
+        ),
+    ],
+    apply_changes: Annotated[
+        bool,
+        typer.Option(
+            "--apply",
+            help="Apply safe repairs and eligible targeted network rechecks.",
+        ),
+    ] = False,
+    force_recheck: Annotated[
+        bool,
+        typer.Option(
+            "--force-recheck",
+            help="Bypass cooldowns for eligible unresolved/failure states.",
+        ),
+    ] = False,
+    only_problems: Annotated[
+        bool,
+        typer.Option(
+            "--only-problems",
+            help="Show only dates needing action; summary remains whole-range.",
+        ),
+    ] = False,
+    status_filter: Annotated[
+        PersistentSyncStatus | None,
+        typer.Option(
+            "--status",
+            help="Show only dates with this reconciled status.",
+        ),
+    ] = None,
+    json_output: Annotated[
+        bool,
+        typer.Option(
+            "--json",
+            help="Emit a clean machine-readable JSON report.",
+        ),
+    ] = False,
+    workers: Annotated[
+        int | None,
+        typer.Option(
+            "--workers",
+            "-w",
+            help=f"Concurrent rechecks (1–{MAX_RANGE_WORKERS}).",
+            min=1,
+            max=MAX_RANGE_WORKERS,
+        ),
+    ] = None,
+) -> None:
+    """Audit a range and optionally apply conservative reconciliation actions."""
+
+    try:
+        generate_date_range(start_date, end_date)
+    except ValueError as exc:
+        _render_reconcile_error("Input error", str(exc), json_output=json_output)
+        raise typer.Exit(code=2) from exc
+
+    if force_recheck and not apply_changes:
+        message = "--force-recheck requires --apply"
+        _render_reconcile_error("Input error", message, json_output=json_output)
+        raise typer.Exit(code=2)
+
+    try:
+        settings = Settings.from_env()
+    except ValueError as exc:
+        _render_reconcile_error(
+            "Configuration error",
+            str(exc),
+            json_output=json_output,
+        )
+        raise typer.Exit(code=1) from exc
+
+    try:
+        resolved_workers = validate_workers(
+            settings.range_workers if workers is None else workers,
+            settings,
+        )
+    except ValueError as exc:
+        _render_reconcile_error("Input error", str(exc), json_output=json_output)
+        raise typer.Exit(code=2) from exc
+
+    try:
+        result = run_reconciliation(
+            start_date,
+            end_date,
+            resolved_workers,
+            apply=apply_changes,
+            force_recheck=force_recheck,
+            settings=settings,
+        )
+    except KeyboardInterrupt as exc:
+        _render_reconcile_error(
+            "Interrupted",
+            "completed atomic work and audit evidence were preserved",
+            json_output=json_output,
+        )
+        raise typer.Exit(code=130) from exc
+    except Exception as exc:
+        _render_reconcile_error(
+            "Reconciliation error",
+            str(exc),
+            json_output=json_output,
+        )
+        raise typer.Exit(code=1) from exc
+
+    if json_output:
+        typer.echo(
+            json.dumps(
+                reconciliation_result_to_dict(
+                    result,
+                    only_problems=only_problems,
+                    status=status_filter,
+                ),
+                indent=2,
+                sort_keys=True,
+            )
+        )
+    else:
+        render_reconciliation_result(
+            result,
+            only_problems=only_problems,
+            status=status_filter,
+        )
+
+    if not result.complete:
         raise typer.Exit(code=3)
 
 

@@ -34,6 +34,7 @@ FAILURE_STATUSES = frozenset(
         DownloadStatus.HTTP_FAILURE,
         DownloadStatus.PARSE_FAILURE,
         DownloadStatus.VALIDATION_FAILURE,
+        DownloadStatus.REPAIR_REQUIRED,
         DownloadStatus.EXISTING_FILE_INVALID,
         DownloadStatus.FILE_CONFLICT,
         DownloadStatus.SAVE_FAILURE,

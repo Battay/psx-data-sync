@@ -22,6 +22,7 @@ CANONICAL_COLUMNS: tuple[str, ...] = (
 MIN_RANGE_WORKERS = 1
 DEFAULT_RANGE_WORKERS = 4
 MAX_RANGE_WORKERS = 16
+MAX_RECHECKS_PER_DATE_PER_RUN = 5
 
 
 def _positive_float(values: Mapping[str, str], name: str, default: float) -> float:
@@ -79,9 +80,12 @@ class Settings:
     range_workers: int = DEFAULT_RANGE_WORKERS
     max_range_workers: int = MAX_RANGE_WORKERS
     large_range_warning_days: int = 365
-    user_agent: str = "psx-data-sync/0.3 (+https://dps.psx.com.pk/)"
+    user_agent: str = "psx-data-sync/0.4 (+https://dps.psx.com.pk/)"
     raw_output_dir: Path = Path("data/raw")
     state_db_path: Path = Path("data/state/psx_sync.db")
+    repair_staging_dir: Path = Path("data/state/repair_staging")
+    max_rechecks_per_date_per_run: int = 1
+    reconciliation_cooldown_seconds: float = 86_400.0
     canonical_columns: tuple[str, ...] = CANONICAL_COLUMNS
 
     @classmethod
@@ -115,6 +119,16 @@ class Settings:
         if range_workers > max_range_workers:
             raise ValueError(
                 "PSX_RANGE_WORKERS cannot exceed PSX_MAX_RANGE_WORKERS"
+            )
+        max_rechecks = _positive_int(
+            values,
+            "PSX_MAX_RECHECKS_PER_DATE_PER_RUN",
+            defaults.max_rechecks_per_date_per_run,
+        )
+        if max_rechecks > MAX_RECHECKS_PER_DATE_PER_RUN:
+            raise ValueError(
+                "PSX_MAX_RECHECKS_PER_DATE_PER_RUN cannot exceed "
+                f"{MAX_RECHECKS_PER_DATE_PER_RUN}"
             )
 
         return cls(
@@ -153,4 +167,15 @@ class Settings:
             state_db_path=Path(
                 values.get("PSX_STATE_DB_PATH", str(defaults.state_db_path))
             ).expanduser(),
+            repair_staging_dir=Path(
+                values.get(
+                    "PSX_REPAIR_STAGING_DIR", str(defaults.repair_staging_dir)
+                )
+            ).expanduser(),
+            max_rechecks_per_date_per_run=max_rechecks,
+            reconciliation_cooldown_seconds=_non_negative_float(
+                values,
+                "PSX_RECONCILIATION_COOLDOWN_SECONDS",
+                defaults.reconciliation_cooldown_seconds,
+            ),
         )

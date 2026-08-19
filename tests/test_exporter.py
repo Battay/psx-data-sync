@@ -37,24 +37,45 @@ def test_canonical_content_is_sorted_and_checksum_is_deterministic(
     assert hashlib.sha256(first).hexdigest() == hashlib.sha256(second).hexdigest()
 
 
-def test_atomic_save_renames_temporary_file(
+def test_atomic_save_creates_without_overwriting(
     tmp_path: Path, fixture_bytes, monkeypatch
 ) -> None:
     calls: list[tuple[Path, Path]] = []
-    real_replace = exporter.os.replace
+    real_link = exporter.os.link
 
-    def observed_replace(source, target) -> None:
+    def observed_link(source, target) -> None:
         calls.append((Path(source), Path(target)))
-        real_replace(source, target)
+        real_link(source, target)
 
-    monkeypatch.setattr(exporter.os, "replace", observed_replace)
+    monkeypatch.setattr(exporter.os, "link", observed_link)
 
     result = save_canonical_csv(valid_rows(fixture_bytes), REQUESTED_DATE, tmp_path)
 
     assert result.status is SaveStatus.CREATED
     assert result.path.exists()
-    assert calls and calls[0][0].suffix == ".tmp"
+    assert calls and calls[0][0].name.endswith(".promotion.tmp")
     assert calls[0][1] == result.path
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_concurrent_save_winner_is_never_overwritten(
+    tmp_path: Path, fixture_bytes, monkeypatch
+) -> None:
+    rows = valid_rows(fixture_bytes)
+    winner_content = canonical_csv_bytes(rows[:1])
+    path = tmp_path / f"market_{REQUESTED_DATE.isoformat()}.csv"
+    real_link = exporter.os.link
+
+    def race_link(source, target) -> None:
+        Path(target).write_bytes(winner_content)
+        real_link(source, target)
+
+    monkeypatch.setattr(exporter.os, "link", race_link)
+
+    result = save_canonical_csv(rows, REQUESTED_DATE, tmp_path)
+
+    assert result.status is SaveStatus.CONFLICT
+    assert path.read_bytes() == winner_content
     assert not list(tmp_path.glob("*.tmp"))
 
 

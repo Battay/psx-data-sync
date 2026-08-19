@@ -109,7 +109,7 @@ def test_schema_initialization_is_versioned_idempotent_and_safe(
     tables, indexes = repository.schema_objects()
     settings = repository.database_settings()
 
-    assert repository.verify_schema() == SCHEMA_VERSION == 1
+    assert repository.verify_schema() == SCHEMA_VERSION == 2
     assert EXPECTED_TABLES <= tables
     assert EXPECTED_INDEXES <= indexes
     assert settings["foreign_keys"] == 1
@@ -427,8 +427,11 @@ def test_missing_modified_and_invalid_verified_files_are_detected(
     missing = make_valid_csv(output_dir, missing_day, fixture_bytes)
     repository.bootstrap_local_files(output_dir)
     missing.path.unlink()
-    assert repository.prepare_fetch(missing_day, output_dir) is None
+    missing_outcome = repository.prepare_fetch(missing_day, output_dir)
     missing_state = repository.get_date_state(missing_day)
+    assert missing_outcome is not None
+    assert missing_outcome.status is DownloadStatus.REPAIR_REQUIRED
+    assert missing_outcome.attempts == 0
     assert missing_state.status is PersistentSyncStatus.FILE_MISSING
     assert missing_state.csv_checksum_sha256 == missing.checksum
 
@@ -443,7 +446,7 @@ def test_missing_modified_and_invalid_verified_files_are_detected(
     conflict = repository.prepare_fetch(conflict_day, output_dir)
     conflict_state = repository.get_date_state(conflict_day)
     assert conflict is not None
-    assert conflict.status is DownloadStatus.FILE_CONFLICT
+    assert conflict.status is DownloadStatus.REPAIR_REQUIRED
     assert conflict_state.status is PersistentSyncStatus.FILE_CONFLICT
     assert conflict_state.csv_checksum_sha256 == original.checksum
     assert original.path.read_bytes() == alternate.path.read_bytes()
@@ -456,9 +459,9 @@ def test_missing_modified_and_invalid_verified_files_are_detected(
     repeated_invalid = repository.prepare_fetch(corrupt_day, output_dir)
     corrupt_state = repository.get_date_state(corrupt_day)
     assert invalid is not None
-    assert invalid.status is DownloadStatus.EXISTING_FILE_INVALID
+    assert invalid.status is DownloadStatus.REPAIR_REQUIRED
     assert repeated_invalid is not None
-    assert repeated_invalid.status is DownloadStatus.EXISTING_FILE_INVALID
+    assert repeated_invalid.status is DownloadStatus.REPAIR_REQUIRED
     assert corrupt_state.status is PersistentSyncStatus.FILE_CORRUPT
     assert corrupt_state.csv_checksum_sha256 == corrupt.checksum
     assert corrupt.path.read_text(encoding="utf-8") == "not,csv\n"
