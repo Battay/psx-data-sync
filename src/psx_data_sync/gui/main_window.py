@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
 from .dashboard import DashboardWidget
 from .download_panel import DownloadWidget
 from .import_panel import ImportWidget
+from .logs_panel import LogsWidget
 from .parquet_panel import ParquetExportWidget
 from .reconciliation_panel import ReconciliationWidget
 
@@ -140,10 +141,9 @@ class PSXMainWindow(QMainWindow):
         )
         self.stack.addWidget(self.parquet_view)
 
-        # Page 5: Placeholder (Logs)
-        for title in self.NAV_ITEMS[5:]:
-            placeholder = PlaceholderWidget(title)
-            self.stack.addWidget(placeholder)
+        # Page 5: Logs Widget
+        self.logs_view = LogsWidget(self.repository)
+        self.stack.addWidget(self.logs_view)
 
         main_layout.addWidget(self.stack)
 

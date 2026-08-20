@@ -41,6 +41,7 @@ from .state import (
     DownloadStatus,
     ExistingFileInspection,
     FileHealthState,
+    LogActivityItem,
     ParquetExportRecord,
     ParquetExportStatus,
     PersistentSyncStatus,
@@ -4954,6 +4955,125 @@ class StateRepository:
             connection.commit()
             return self._parquet_export_from_row(row)
 
+    def get_activity_logs(
+        self,
+        limit: int = 300,
+        activity_type_filter: str | None = None,
+        status_filter: str | None = None,
+    ) -> tuple[LogActivityItem, ...]:
+        """Query unified read-only operational activity entries across state tables."""
+
+        items: list[LogActivityItem] = []
+        with self._connect() as connection:
+            cursor = connection.cursor()
+
+            # 1. Sync Runs
+            if not activity_type_filter or activity_type_filter.upper() in ("SYNC_RUN", "ALL"):
+                cursor.execute(
+                    """
+                    SELECT run_id, command_type, start_date, end_date, started_at, finished_at, status, requested_date_count, total_valid_rows
+                    FROM sync_runs
+                    ORDER BY started_at DESC LIMIT ?
+                    """,
+                    (limit,),
+                )
+                for row in cursor.fetchall():
+                    ts = row[4] or row[5] or ""
+                    date_range = f"{row[2]} → {row[3]}" if row[2] and row[3] else (row[2] or row[3] or "—")
+                    metrics = f"Dates: {row[7]}, Valid Rows: {row[8]:,}" if row[8] is not None else f"Dates: {row[7]}"
+                    items.append(
+                        LogActivityItem(
+                            timestamp=ts,
+                            activity_type="SYNC_RUN",
+                            reference_id=row[0],
+                            market_date_or_range=date_range,
+                            status=row[6] or "UNKNOWN",
+                            metrics_summary=metrics,
+                            details=f"Command: {row[1]} | Status: {row[6]}",
+                        )
+                    )
+
+            # 2. Reconciliation Runs
+            if not activity_type_filter or activity_type_filter.upper() in ("RECONCILIATION", "ALL"):
+                cursor.execute(
+                    """
+                    SELECT run_id, mode, start_date, end_date, started_at, finished_at, complete, requested_date_count, verified_count, status_transition_count
+                    FROM reconciliation_runs
+                    ORDER BY started_at DESC LIMIT ?
+                    """,
+                    (limit,),
+                )
+                for row in cursor.fetchall():
+                    ts = row[4] or row[5] or ""
+                    date_range = f"{row[2]} → {row[3]}" if row[2] and row[3] else (row[2] or row[3] or "—")
+                    metrics = f"Dates: {row[7]}, Verified: {row[8]}, Transitions: {row[9]}"
+                    items.append(
+                        LogActivityItem(
+                            timestamp=ts,
+                            activity_type="RECONCILIATION",
+                            reference_id=row[0],
+                            market_date_or_range=date_range,
+                            status=row[1] or "UNKNOWN",
+                            metrics_summary=metrics,
+                            details=f"Mode: {row[1]} | Complete: {bool(row[6])} | Policy: v1",
+                        )
+                    )
+
+            # 3. Download Attempts
+            if not activity_type_filter or activity_type_filter.upper() in ("DOWNLOAD_ATTEMPT", "ALL"):
+                cursor.execute(
+                    """
+                    SELECT run_id, market_date, attempt_number, started_at, http_status, final_status, response_bytes, response_classification, error_message
+                    FROM download_attempts
+                    ORDER BY started_at DESC LIMIT ?
+                    """,
+                    (limit,),
+                )
+                for row in cursor.fetchall():
+                    metrics = f"Attempt #{row[2]}, HTTP {row[4] or '—'}, Bytes: {row[6]:,}" if row[6] is not None else f"Attempt #{row[2]}"
+                    items.append(
+                        LogActivityItem(
+                            timestamp=row[3] or "",
+                            activity_type="DOWNLOAD_ATTEMPT",
+                            reference_id=row[0],
+                            market_date_or_range=row[1],
+                            status=row[5] or "UNKNOWN",
+                            metrics_summary=metrics,
+                            details=f"HTTP: {row[4]} | Class: {row[7] or '—'} | Error: {row[8] or 'None'}",
+                        )
+                    )
+
+            # 4. Parquet Exports
+            if not activity_type_filter or activity_type_filter.upper() in ("PARQUET_EXPORT", "ALL"):
+                cursor.execute(
+                    """
+                    SELECT market_date, status, schema_version, source_row_count, parquet_row_count, updated_at, last_error
+                    FROM parquet_exports
+                    ORDER BY updated_at DESC LIMIT ?
+                    """,
+                    (limit,),
+                )
+                for row in cursor.fetchall():
+                    metrics = f"Source Rows: {row[3]:,}, Parquet Rows: {row[4] if row[4] is not None else '—'}"
+                    items.append(
+                        LogActivityItem(
+                            timestamp=row[5] or "",
+                            activity_type="PARQUET_EXPORT",
+                            reference_id=row[0],
+                            market_date_or_range=row[0],
+                            status=row[1] or "UNKNOWN",
+                            metrics_summary=metrics,
+                            details=f"Schema: {row[2]} | Status: {row[1]} | Error: {row[6] or 'None'}",
+                        )
+                    )
+
+        if status_filter:
+            sf_upper = status_filter.upper()
+            items = [i for i in items if sf_upper in i.status.upper()]
+
+        items.sort(key=lambda x: x.timestamp, reverse=True)
+        return tuple(items[:limit])
+
 
 class AsyncStateRepository:
     """Async façade with one serialized writer and thread-local connections."""
@@ -5039,6 +5159,19 @@ class AsyncStateRepository:
 
     async def get_dashboard_summary(self) -> DashboardSummary:
         return await self.run_serialized(self.repository.get_dashboard_summary)
+
+    async def get_activity_logs(
+        self,
+        limit: int = 300,
+        activity_type_filter: str | None = None,
+        status_filter: str | None = None,
+    ) -> tuple[LogActivityItem, ...]:
+        return await self.run_serialized(
+            self.repository.get_activity_logs,
+            limit=limit,
+            activity_type_filter=activity_type_filter,
+            status_filter=status_filter,
+        )
 
     async def get_parquet_export(
         self, market_date: str | date

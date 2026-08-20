@@ -618,3 +618,16 @@ class DashboardSummary:
     parquet_corrupt_count: int
     parquet_failed_count: int
     total_canonical_csv_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class LogActivityItem:
+    """Read-only operational activity log item for GUI and CLI viewers."""
+
+    timestamp: str
+    activity_type: str
+    reference_id: str
+    market_date_or_range: str
+    status: str
+    metrics_summary: str
+    details: str
