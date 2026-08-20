@@ -28,3 +28,6 @@ test = [
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pyrefly]
+search-path = [".", "src"]

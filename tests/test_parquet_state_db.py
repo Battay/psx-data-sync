@@ -892,7 +892,7 @@ def test_v2_to_v3_migration_preserves_all_existing_data(tmp_path: Path) -> None:
 
 
 def test_v1_to_v3_migration_still_works(tmp_path: Path) -> None:
-    from test_reconciliation_state_db import create_frozen_v1_database
+    from tests.test_reconciliation_state_db import create_frozen_v1_database
 
     db = tmp_path / "v1_migration.db"
     create_frozen_v1_database(db)

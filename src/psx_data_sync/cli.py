@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import sqlite3
+import sys
 import time
 from collections.abc import Mapping
 from dataclasses import fields, is_dataclass, replace
