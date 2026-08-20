@@ -109,7 +109,7 @@ def test_schema_initialization_is_versioned_idempotent_and_safe(
     tables, indexes = repository.schema_objects()
     settings = repository.database_settings()
 
-    assert repository.verify_schema() == SCHEMA_VERSION == 2
+    assert repository.verify_schema() == SCHEMA_VERSION == 3
     assert EXPECTED_TABLES <= tables
     assert EXPECTED_INDEXES <= indexes
     assert settings["foreign_keys"] == 1

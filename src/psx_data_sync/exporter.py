@@ -464,3 +464,26 @@ def save_canonical_csv(
     if existing is not None:
         return existing
     raise OSError(f"canonical destination changed repeatedly while saving {path}")
+
+def load_canonical_csv_rows(
+    path: Path,
+    columns: Sequence[str] = CANONICAL_COLUMNS,
+) -> tuple[ValidEquityRow, ...]:
+    """Load a canonical CSV only when its exact deterministic bytes are valid."""
+
+    path = Path(path)
+    inspection, content = _read_and_inspect_canonical_file(path, columns)
+
+    if not inspection.exists:
+        raise FileNotFoundError(f"canonical CSV does not exist: {path}")
+
+    if not inspection.valid or content is None:
+        raise ValueError(
+            inspection.error or f"canonical CSV is invalid: {path}"
+        )
+
+    rows, error = _validated_existing_rows(content, columns)
+    if rows is None:
+        raise ValueError(error or f"canonical CSV is invalid: {path}")
+
+    return rows

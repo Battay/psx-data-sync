@@ -565,3 +565,32 @@ class ReconciliationRunRecord:
     status: ReconciliationRunStatus
     error_message: str | None
     application_version: str
+
+
+class ParquetExportStatus(StrEnum):
+    """Persistent state of one derived Parquet market-date partition."""
+
+    CURRENT = "CURRENT"
+    MISSING = "MISSING"
+    STALE = "STALE"
+    CORRUPT = "CORRUPT"
+    FAILED = "FAILED"
+
+
+@dataclass(frozen=True, slots=True)
+class ParquetExportRecord:
+    """Persistent provenance for one derived Parquet partition."""
+
+    market_date: str
+    status: ParquetExportStatus
+    schema_version: str
+    source_csv_checksum_sha256: str
+    source_row_count: int
+    parquet_relative_path: str | None
+    parquet_checksum_sha256: str | None
+    parquet_row_count: int | None
+    exporter_version: str
+    created_at: str
+    updated_at: str
+    verified_at: str | None
+    last_error: str | None

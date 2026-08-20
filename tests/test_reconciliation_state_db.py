@@ -432,7 +432,7 @@ def test_frozen_v1_migrates_to_v2_without_losing_history(tmp_path: Path) -> None
     repository = make_repository(database, tmp_path)
     repository.initialize()
 
-    assert repository.verify_schema() == SCHEMA_VERSION == 2
+    assert repository.verify_schema() == SCHEMA_VERSION == 3
     state = repository.get_date_state(MARKET_DATE)
     assert state is not None
     assert state.status is PersistentSyncStatus.VERIFIED_TRADING_DATA
@@ -464,7 +464,7 @@ def test_frozen_v1_migrates_to_v2_without_losing_history(tmp_path: Path) -> None
             (V1_RUN_ID,),
         ).fetchone()
         assert metadata is not None
-        assert metadata["schema_version"] == 2
+        assert metadata["schema_version"] == 3
         assert metadata["created_at"] == V1_CREATED_AT
         assert result is not None and result["checksum"] == "a" * 64
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
@@ -484,7 +484,7 @@ def test_v1_migration_and_fresh_v2_initialization_are_idempotent(
     for repository, expected_dates in ((migrated, 1), (fresh, 0)):
         repository.initialize()
         repository.initialize()
-        assert repository.verify_schema() == 2
+        assert repository.verify_schema() == 3
         tables, indexes = repository.schema_objects()
         assert EXPECTED_TABLES <= tables
         assert EXPECTED_INDEXES <= indexes

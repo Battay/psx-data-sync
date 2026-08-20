@@ -40,6 +40,8 @@ from .state import (
     DownloadStatus,
     ExistingFileInspection,
     FileHealthState,
+    ParquetExportRecord,
+    ParquetExportStatus,
     PersistentSyncStatus,
     StateSummary,
     SyncEvidenceState,
@@ -54,7 +56,7 @@ from .state import (
 )
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 MARKET_FILE_PATTERN = re.compile(r"^market_(\d{4}-\d{2}-\d{2})\.csv$")
 VERIFIED_STATUSES = frozenset(
     {
@@ -96,6 +98,7 @@ EXPECTED_TABLES = frozenset(
         "reconciliation_events",
         "repair_candidates",
         "reconciliation_recheck_claims",
+        "parquet_exports",
     }
 )
 EXPECTED_INDEXES = frozenset(
@@ -113,6 +116,7 @@ EXPECTED_INDEXES = frozenset(
         "idx_download_attempts_evidence",
         "idx_repair_candidates_market_date",
         "idx_recheck_claims_expires_at",
+        "idx_parquet_exports_status",
     }
 )
 EXPECTED_DATE_STATE_COLUMNS = frozenset(
@@ -193,6 +197,25 @@ EXPECTED_RECONCILIATION_COLUMNS = {
     ),
     "reconciliation_recheck_claims": frozenset(
         {"market_date", "reconciliation_run_id", "claimed_at", "expires_at"}
+    ),
+}
+EXPECTED_PARQUET_COLUMNS = {
+    "parquet_exports": frozenset(
+        {
+            "market_date",
+            "status",
+            "schema_version",
+            "source_csv_checksum_sha256",
+            "source_row_count",
+            "parquet_relative_path",
+            "parquet_checksum_sha256",
+            "parquet_row_count",
+            "exporter_version",
+            "created_at",
+            "updated_at",
+            "verified_at",
+            "last_error",
+        }
     ),
 }
 EXPECTED_TABLE_COLUMNS = {
@@ -302,6 +325,7 @@ EXPECTED_TABLE_COLUMNS = {
         }
     ),
     **EXPECTED_RECONCILIATION_COLUMNS,
+    **EXPECTED_PARQUET_COLUMNS,
 }
 EXPECTED_PRIMARY_KEYS = {
     "sync_schema_metadata": ("singleton",),
@@ -313,6 +337,7 @@ EXPECTED_PRIMARY_KEYS = {
     "reconciliation_events": ("id",),
     "repair_candidates": ("id",),
     "reconciliation_recheck_claims": ("market_date",),
+    "parquet_exports": ("market_date",),
 }
 EXPECTED_UNIQUE_COLUMN_SETS = {
     "download_attempts": frozenset(
@@ -386,6 +411,17 @@ EXPECTED_FOREIGN_KEYS = {
                 "reconciliation_runs",
                 "reconciliation_run_id",
                 "run_id",
+                "NO ACTION",
+                "NO ACTION",
+            )
+        }
+    ),
+    "parquet_exports": frozenset(
+        {
+            (
+                "date_sync_state",
+                "market_date",
+                "market_date",
                 "NO ACTION",
                 "NO ACTION",
             )
@@ -469,6 +505,12 @@ EXPECTED_INDEX_SHAPES = {
     "idx_recheck_claims_expires_at": (
         "reconciliation_recheck_claims",
         ("expires_at",),
+        False,
+        None,
+    ),
+    "idx_parquet_exports_status": (
+        "parquet_exports",
+        ("status",),
         False,
         None,
     ),
@@ -770,6 +812,7 @@ class StateRepository:
                 ).fetchone()
                 if preflight is not None and preflight["schema_version"] not in {
                     1,
+                    2,
                     SCHEMA_VERSION,
                 }:
                     raise IncompatibleSchemaError(
@@ -794,6 +837,7 @@ class StateRepository:
             ).fetchone()
             if existing is not None and existing["schema_version"] not in {
                 1,
+                2,
                 SCHEMA_VERSION,
             }:
                 raise IncompatibleSchemaError(
@@ -1116,6 +1160,30 @@ class StateRepository:
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_recheck_claims_expires_at "
                 "ON reconciliation_recheck_claims(expires_at)"
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS parquet_exports (
+                    market_date TEXT PRIMARY KEY,
+                    status TEXT NOT NULL,
+                    schema_version TEXT NOT NULL,
+                    source_csv_checksum_sha256 TEXT NOT NULL,
+                    source_row_count INTEGER NOT NULL CHECK (source_row_count >= 0),
+                    parquet_relative_path TEXT,
+                    parquet_checksum_sha256 TEXT,
+                    parquet_row_count INTEGER CHECK (parquet_row_count IS NULL OR parquet_row_count >= 0),
+                    exporter_version TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    verified_at TEXT,
+                    last_error TEXT,
+                    FOREIGN KEY (market_date) REFERENCES date_sync_state(market_date)
+                )
+                """
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_parquet_exports_status "
+                "ON parquet_exports(status)"
             )
             connection.execute(
                 """
@@ -4464,6 +4532,241 @@ class StateRepository:
                 ),
             )
 
+    @staticmethod
+    def _parquet_export_from_row(row: sqlite3.Row) -> ParquetExportRecord:
+        return ParquetExportRecord(
+            market_date=row["market_date"],
+            status=ParquetExportStatus(row["status"]),
+            schema_version=row["schema_version"],
+            source_csv_checksum_sha256=row["source_csv_checksum_sha256"],
+            source_row_count=row["source_row_count"],
+            parquet_relative_path=row["parquet_relative_path"],
+            parquet_checksum_sha256=row["parquet_checksum_sha256"],
+            parquet_row_count=row["parquet_row_count"],
+            exporter_version=row["exporter_version"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+            verified_at=row["verified_at"],
+            last_error=row["last_error"],
+        )
+
+    def get_parquet_export(
+        self, market_date: str | date
+    ) -> ParquetExportRecord | None:
+        date_text = (
+            market_date.isoformat()
+            if isinstance(market_date, date)
+            else market_date
+        )
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM parquet_exports WHERE market_date = ?",
+                (date_text,),
+            ).fetchone()
+        return None if row is None else self._parquet_export_from_row(row)
+
+    def get_parquet_exports_for_range(
+        self, start_date: str | date, end_date: str | date
+    ) -> tuple[ParquetExportRecord, ...]:
+        start_text = (
+            start_date.isoformat()
+            if isinstance(start_date, date)
+            else start_date
+        )
+        end_text = (
+            end_date.isoformat()
+            if isinstance(end_date, date)
+            else end_date
+        )
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM parquet_exports
+                WHERE market_date BETWEEN ? AND ?
+                ORDER BY market_date ASC
+                """,
+                (start_text, end_text),
+            ).fetchall()
+        return tuple(self._parquet_export_from_row(row) for row in rows)
+
+    def upsert_parquet_export(
+        self,
+        market_date: str | date,
+        *,
+        status: ParquetExportStatus | str,
+        schema_version: str,
+        source_csv_checksum_sha256: str,
+        source_row_count: int,
+        parquet_path: Path | str | None = None,
+        parquet_checksum_sha256: str | None = None,
+        parquet_row_count: int | None = None,
+        exporter_version: str = __version__,
+        verified_at: str | None = None,
+        last_error: str | None = None,
+    ) -> ParquetExportRecord:
+        date_text = (
+            market_date.isoformat()
+            if isinstance(market_date, date)
+            else market_date
+        )
+        try:
+            status_enum = (
+                status
+                if isinstance(status, ParquetExportStatus)
+                else ParquetExportStatus(status)
+            )
+        except ValueError as exc:
+            raise StateDatabaseError(
+                f"invalid parquet export status: {status!r}"
+            ) from exc
+
+        relative_path = (
+            self._relative_path(Path(parquet_path))
+            if parquet_path is not None
+            else None
+        )
+        cleaned_error = _clean_error(last_error)
+
+        if status_enum is ParquetExportStatus.CURRENT:
+            if relative_path is None:
+                raise StateDatabaseError(
+                    f"CURRENT export state for {date_text} requires parquet_path"
+                )
+            if parquet_checksum_sha256 is None:
+                raise StateDatabaseError(
+                    f"CURRENT export state for {date_text} requires parquet_checksum_sha256"
+                )
+            if parquet_row_count is None:
+                raise StateDatabaseError(
+                    f"CURRENT export state for {date_text} requires parquet_row_count"
+                )
+            if parquet_row_count != source_row_count:
+                raise StateDatabaseError(
+                    f"CURRENT export state row count mismatch for {date_text}: "
+                    f"parquet_row_count ({parquet_row_count}) != source_row_count ({source_row_count})"
+                )
+            if verified_at is None:
+                raise StateDatabaseError(
+                    f"CURRENT export state for {date_text} requires verified_at timestamp"
+                )
+        elif status_enum is ParquetExportStatus.MISSING:
+            if (
+                relative_path is not None
+                or parquet_checksum_sha256 is not None
+                or parquet_row_count is not None
+            ):
+                raise StateDatabaseError(
+                    f"MISSING export state for {date_text} cannot have parquet artifact metadata"
+                )
+            if verified_at is not None:
+                raise StateDatabaseError(
+                    f"MISSING export state for {date_text} cannot have verified_at timestamp"
+                )
+        elif status_enum is ParquetExportStatus.STALE:
+            if verified_at is not None:
+                raise StateDatabaseError(
+                    f"STALE export state for {date_text} cannot have verified_at timestamp"
+                )
+        elif status_enum is ParquetExportStatus.CORRUPT:
+            if verified_at is not None:
+                raise StateDatabaseError(
+                    f"CORRUPT export state for {date_text} cannot have verified_at timestamp"
+                )
+        elif status_enum is ParquetExportStatus.FAILED:
+            if verified_at is not None:
+                raise StateDatabaseError(
+                    f"FAILED export state for {date_text} cannot have verified_at timestamp"
+                )
+            if not cleaned_error:
+                raise StateDatabaseError(
+                    f"FAILED export state for {date_text} requires last_error"
+                )
+
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            date_row = connection.execute(
+                """
+                SELECT status, csv_checksum_sha256, valid_row_count
+                FROM date_sync_state WHERE market_date = ?
+                """,
+                (date_text,),
+            ).fetchone()
+
+            if date_row is None:
+                raise StateDatabaseError(
+                    f"cannot export untracked date: {date_text}"
+                )
+
+            if date_row["status"] != PersistentSyncStatus.VERIFIED_TRADING_DATA.value:
+                raise StateDatabaseError(
+                    f"cannot export date {date_text} with status {date_row['status']}; "
+                    "must be VERIFIED_TRADING_DATA"
+                )
+
+            if source_csv_checksum_sha256 != date_row["csv_checksum_sha256"]:
+                raise StateDatabaseError(
+                    f"source CSV checksum mismatch for {date_text}: "
+                    f"expected {date_row['csv_checksum_sha256']}, got {source_csv_checksum_sha256}"
+                )
+
+            if source_row_count != date_row["valid_row_count"]:
+                raise StateDatabaseError(
+                    f"source row count mismatch for {date_text}: "
+                    f"expected {date_row['valid_row_count']}, got {source_row_count}"
+                )
+
+            existing = connection.execute(
+                "SELECT created_at FROM parquet_exports WHERE market_date = ?",
+                (date_text,),
+            ).fetchone()
+
+            now = utc_now_iso()
+            created_at = existing["created_at"] if existing is not None else now
+
+            connection.execute(
+                """
+                INSERT INTO parquet_exports (
+                    market_date, status, schema_version, source_csv_checksum_sha256,
+                    source_row_count, parquet_relative_path, parquet_checksum_sha256,
+                    parquet_row_count, exporter_version, created_at, updated_at,
+                    verified_at, last_error
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(market_date) DO UPDATE SET
+                    status = excluded.status,
+                    schema_version = excluded.schema_version,
+                    source_csv_checksum_sha256 = excluded.source_csv_checksum_sha256,
+                    source_row_count = excluded.source_row_count,
+                    parquet_relative_path = excluded.parquet_relative_path,
+                    parquet_checksum_sha256 = excluded.parquet_checksum_sha256,
+                    parquet_row_count = excluded.parquet_row_count,
+                    exporter_version = excluded.exporter_version,
+                    updated_at = excluded.updated_at,
+                    verified_at = excluded.verified_at,
+                    last_error = excluded.last_error
+                """,
+                (
+                    date_text,
+                    status_enum.value,
+                    schema_version,
+                    source_csv_checksum_sha256,
+                    source_row_count,
+                    relative_path,
+                    parquet_checksum_sha256,
+                    parquet_row_count,
+                    exporter_version,
+                    created_at,
+                    now,
+                    verified_at,
+                    cleaned_error,
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM parquet_exports WHERE market_date = ?",
+                (date_text,),
+            ).fetchone()
+            connection.commit()
+            return self._parquet_export_from_row(row)
+
 
 class AsyncStateRepository:
     """Async façade with one serialized writer and thread-local connections."""
@@ -4542,4 +4845,50 @@ class AsyncStateRepository:
     ) -> None:
         await self.run_serialized(
             self.repository.record_staged_download_result, run_id, result
+        )
+
+    async def get_parquet_export(
+        self, market_date: str | date
+    ) -> ParquetExportRecord | None:
+        return await self.run_serialized(
+            self.repository.get_parquet_export, market_date
+        )
+
+    async def get_parquet_exports_for_range(
+        self, start_date: str | date, end_date: str | date
+    ) -> tuple[ParquetExportRecord, ...]:
+        return await self.run_serialized(
+            self.repository.get_parquet_exports_for_range,
+            start_date,
+            end_date,
+        )
+
+    async def upsert_parquet_export(
+        self,
+        market_date: str | date,
+        *,
+        status: ParquetExportStatus | str,
+        schema_version: str,
+        source_csv_checksum_sha256: str,
+        source_row_count: int,
+        parquet_path: Path | str | None = None,
+        parquet_checksum_sha256: str | None = None,
+        parquet_row_count: int | None = None,
+        exporter_version: str = __version__,
+        verified_at: str | None = None,
+        last_error: str | None = None,
+    ) -> ParquetExportRecord:
+        return await self.run_serialized(
+            self.repository.upsert_parquet_export,
+            market_date,
+            status=status,
+            schema_version=schema_version,
+            source_csv_checksum_sha256=source_csv_checksum_sha256,
+            source_row_count=source_row_count,
+            parquet_path=parquet_path,
+            parquet_checksum_sha256=parquet_checksum_sha256,
+            parquet_row_count=parquet_row_count,
+            exporter_version=exporter_version,
+            verified_at=verified_at,
+            last_error=last_error,
         )
