@@ -14,6 +14,7 @@ dependencies = [
     "pandas",
     "pyarrow",
     "pydantic",
+    "PySide6>=6.5.0",
     "rich",
     "tenacity",
     "typer",

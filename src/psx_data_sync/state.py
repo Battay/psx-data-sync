@@ -594,3 +594,27 @@ class ParquetExportRecord:
     updated_at: str
     verified_at: str | None
     last_error: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class DashboardSummary:
+    """Read-only dashboard metadata summary from state database and raw store."""
+
+    application_version: str
+    schema_version: int
+    database_path: Path
+    total_tracked_dates: int
+    earliest_date: str | None
+    latest_date: str | None
+    verified_trading_count: int
+    local_csv_verified_count: int
+    confirmed_non_trading_count: int
+    empty_unresolved_count: int
+    file_issue_count: int
+    failure_count: int
+    parquet_current_count: int
+    parquet_missing_count: int
+    parquet_stale_count: int
+    parquet_corrupt_count: int
+    parquet_failed_count: int
+    total_canonical_csv_count: int

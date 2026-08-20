@@ -32,6 +32,7 @@ from .state import (
     BootstrapFileResult,
     BootstrapResult,
     AttemptEvidenceRecord,
+    DashboardSummary,
     DateSyncState,
     DateReconciliationResult,
     DownloadAttemptEvent,
@@ -2811,6 +2812,124 @@ class StateRepository:
         )
         return PersistentSyncStatus.VERIFIED_TRADING_DATA
 
+    def get_dashboard_summary(self) -> DashboardSummary:
+        """Fetch read-only summary metrics for GUI dashboard presentation."""
+
+        with self._connect() as connection:
+            range_row = connection.execute(
+                """
+                SELECT COUNT(*) AS total,
+                       MIN(market_date) AS earliest,
+                       MAX(market_date) AS latest
+                FROM date_sync_state
+                """
+            ).fetchone()
+
+            total_tracked = range_row["total"] if range_row else 0
+            earliest = range_row["earliest"] if range_row else None
+            latest = range_row["latest"] if range_row else None
+
+            status_rows = connection.execute(
+                """
+                SELECT status, COUNT(*) AS cnt
+                FROM date_sync_state
+                GROUP BY status
+                """
+            ).fetchall()
+            status_counts = {row["status"]: row["cnt"] for row in status_rows}
+
+            verified_trading = status_counts.get(
+                PersistentSyncStatus.VERIFIED_TRADING_DATA.value, 0
+            )
+            confirmed_non_trading = status_counts.get(
+                PersistentSyncStatus.CONFIRMED_NON_TRADING.value, 0
+            )
+            empty_unresolved = status_counts.get(
+                PersistentSyncStatus.EMPTY_UNRESOLVED.value, 0
+            )
+
+            file_issue_statuses = {
+                PersistentSyncStatus.FILE_CORRUPT.value,
+                PersistentSyncStatus.FILE_MISSING.value,
+                PersistentSyncStatus.FILE_CONFLICT.value,
+            }
+            file_issue_count = sum(
+                status_counts.get(st, 0) for st in file_issue_statuses
+            )
+
+            failure_statuses = {
+                PersistentSyncStatus.TEMPORARY_FAILURE.value,
+                PersistentSyncStatus.HTTP_FAILURE.value,
+                PersistentSyncStatus.PARSE_FAILURE.value,
+                PersistentSyncStatus.VALIDATION_FAILURE.value,
+            }
+            failure_count = sum(
+                status_counts.get(st, 0) for st in failure_statuses
+            )
+
+            local_evidence_row = connection.execute(
+                """
+                SELECT COUNT(*) AS cnt
+                FROM date_sync_state
+                WHERE evidence_state = ?
+                """,
+                (SyncEvidenceState.LOCAL_CSV_SHA256_VERIFIED.value,),
+            ).fetchone()
+            local_csv_verified = (
+                local_evidence_row["cnt"] if local_evidence_row else 0
+            )
+
+            parquet_rows = connection.execute(
+                """
+                SELECT status, COUNT(*) AS cnt
+                FROM parquet_exports
+                GROUP BY status
+                """
+            ).fetchall()
+            parquet_counts = {row["status"]: row["cnt"] for row in parquet_rows}
+
+            parquet_current = parquet_counts.get(
+                ParquetExportStatus.CURRENT.value, 0
+            )
+            parquet_missing = parquet_counts.get(
+                ParquetExportStatus.MISSING.value, 0
+            )
+            parquet_stale = parquet_counts.get(
+                ParquetExportStatus.STALE.value, 0
+            )
+            parquet_corrupt = parquet_counts.get(
+                ParquetExportStatus.CORRUPT.value, 0
+            )
+            parquet_failed = parquet_counts.get(
+                ParquetExportStatus.FAILED.value, 0
+            )
+
+        raw_dir = self.project_root / "data" / "raw"
+        canonical_csv_count = (
+            len(list(raw_dir.glob("market_*.csv"))) if raw_dir.exists() else 0
+        )
+
+        return DashboardSummary(
+            application_version=self.application_version,
+            schema_version=SCHEMA_VERSION,
+            database_path=self.database_path,
+            total_tracked_dates=total_tracked,
+            earliest_date=earliest,
+            latest_date=latest,
+            verified_trading_count=verified_trading,
+            local_csv_verified_count=local_csv_verified,
+            confirmed_non_trading_count=confirmed_non_trading,
+            empty_unresolved_count=empty_unresolved,
+            file_issue_count=file_issue_count,
+            failure_count=failure_count,
+            parquet_current_count=parquet_current,
+            parquet_missing_count=parquet_missing,
+            parquet_stale_count=parquet_stale,
+            parquet_corrupt_count=parquet_corrupt,
+            parquet_failed_count=parquet_failed,
+            total_canonical_csv_count=canonical_csv_count,
+        )
+
     def finish_sync_run(
         self,
         run_id: str,
@@ -4917,6 +5036,9 @@ class AsyncStateRepository:
 
     async def index_local_file(self, path: Path) -> PersistentSyncStatus:
         return await self.run_serialized(self.repository.index_local_file, path)
+
+    async def get_dashboard_summary(self) -> DashboardSummary:
+        return await self.run_serialized(self.repository.get_dashboard_summary)
 
     async def get_parquet_export(
         self, market_date: str | date

@@ -1321,6 +1321,15 @@ def _repository_from_settings(settings: Settings) -> StateRepository:
     return repository
 
 
+@app.command("gui")
+def gui_command() -> None:
+    """Launch the PSX Data Sync desktop GUI application."""
+
+    from .gui import main as gui_main
+
+    sys.exit(gui_main())
+
+
 @app.command("state-bootstrap")
 def state_bootstrap_command() -> None:
     """Index existing canonical CSV files without making network requests."""
