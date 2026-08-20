@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
 from .dashboard import DashboardWidget
 from .download_panel import DownloadWidget
 from .import_panel import ImportWidget
+from .parquet_panel import ParquetExportWidget
 from .reconciliation_panel import ReconciliationWidget
 
 if TYPE_CHECKING:
@@ -132,8 +133,15 @@ class PSXMainWindow(QMainWindow):
         )
         self.stack.addWidget(self.reconciliation_view)
 
-        # Pages 4-5: Placeholders
-        for title in self.NAV_ITEMS[4:]:
+        # Page 4: Parquet Export Widget
+        self.parquet_view = ParquetExportWidget(
+            self.repository,
+            on_export_success=self.dashboard_view.refresh_dashboard,
+        )
+        self.stack.addWidget(self.parquet_view)
+
+        # Page 5: Placeholder (Logs)
+        for title in self.NAV_ITEMS[5:]:
             placeholder = PlaceholderWidget(title)
             self.stack.addWidget(placeholder)
 
