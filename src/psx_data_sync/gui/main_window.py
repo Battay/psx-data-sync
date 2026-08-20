@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
 )
 
 from .dashboard import DashboardWidget
+from .download_panel import DownloadWidget
 from .import_panel import ImportWidget
 
 if TYPE_CHECKING:
@@ -122,8 +123,15 @@ class PSXMainWindow(QMainWindow):
         )
         self.stack.addWidget(self.import_view)
 
-        # Pages 2-5: Placeholders
-        for title in self.NAV_ITEMS[2:]:
+        # Page 2: Download Widget
+        self.download_view = DownloadWidget(
+            self.repository,
+            on_download_success=self.dashboard_view.refresh_dashboard,
+        )
+        self.stack.addWidget(self.download_view)
+
+        # Pages 3-5: Placeholders
+        for title in self.NAV_ITEMS[3:]:
             placeholder = PlaceholderWidget(title)
             self.stack.addWidget(placeholder)
 
