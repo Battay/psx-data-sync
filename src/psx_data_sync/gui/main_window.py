@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
 )
 
 from .dashboard import DashboardWidget
+from .import_panel import ImportWidget
 
 if TYPE_CHECKING:
     from ..state_db import StateRepository
@@ -110,12 +111,19 @@ class PSXMainWindow(QMainWindow):
         # Main content area stacked widget
         self.stack = QStackedWidget()
 
-        # Page 0: Dashboard (working view)
+        # Page 0: Dashboard
         self.dashboard_view = DashboardWidget(self.repository)
         self.stack.addWidget(self.dashboard_view)
 
-        # Pages 1-5: Placeholders
-        for title in self.NAV_ITEMS[1:]:
+        # Page 1: Import Widget
+        self.import_view = ImportWidget(
+            self.repository,
+            on_import_success=self.dashboard_view.refresh_dashboard,
+        )
+        self.stack.addWidget(self.import_view)
+
+        # Pages 2-5: Placeholders
+        for title in self.NAV_ITEMS[2:]:
             placeholder = PlaceholderWidget(title)
             self.stack.addWidget(placeholder)
 
