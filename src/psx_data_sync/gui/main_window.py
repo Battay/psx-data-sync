@@ -65,7 +65,8 @@ class PSXMainWindow(QMainWindow):
         super().__init__(parent)
         self.repository = repository
         self.setWindowTitle("PSX Data Sync")
-        self.resize(1024, 700)
+        self.setMinimumSize(1100, 720)
+        self.resize(1180, 760)
 
         self._init_ui()
 
@@ -79,27 +80,20 @@ class PSXMainWindow(QMainWindow):
 
         # Sidebar navigation panel
         sidebar_container = QWidget()
-        sidebar_container.setFixedWidth(200)
+        sidebar_container.setFixedWidth(220)
         sidebar_container.setStyleSheet(
-            "background-color: #f4f5f7; border-right: 1px solid #e1e4e8;"
+            "background-color: #161e2e; border-right: 1px solid #1e293b;"
         )
         sidebar_layout = QVBoxLayout(sidebar_container)
-        sidebar_layout.setContentsMargins(8, 16, 8, 16)
+        sidebar_layout.setContentsMargins(10, 20, 10, 20)
 
         app_title = QLabel("PSX Data Sync")
         app_title.setStyleSheet(
-            "font-size: 16px; font-weight: bold; padding-left: 8px; margin-bottom:"
-            " 12px;"
+            "font-size: 17px; font-weight: 700; color: #f8fafc; padding-left: 8px; margin-bottom: 16px;"
         )
         sidebar_layout.addWidget(app_title)
 
         self.nav_list = QListWidget()
-        self.nav_list.setStyleSheet(
-            "QListWidget { border: none; background: transparent; font-size:"
-            " 14px; }\nQListWidget::item { padding: 10px; border-radius: 4px;"
-            " }\nQListWidget::item:selected { background-color: #0066cc; color:"
-            " white; }"
-        )
 
         for item_name in self.NAV_ITEMS:
             item = QListWidgetItem(item_name)

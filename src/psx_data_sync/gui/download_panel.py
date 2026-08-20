@@ -100,9 +100,7 @@ class DownloadWidget(QWidget):
         controls_layout.addStretch()
 
         self.btn_download = QPushButton("Download / Fetch Range")
-        self.btn_download.setStyleSheet(
-            "font-weight: bold; background-color: #0066cc; color: white; padding: 6px 16px;"
-        )
+        self.btn_download.setProperty("accent", True)
         self.btn_download.clicked.connect(self.run_download)
         controls_layout.addWidget(self.btn_download)
 
@@ -111,13 +109,13 @@ class DownloadWidget(QWidget):
         # Status & Progress Bar
         status_layout = QHBoxLayout()
         self.lbl_status = QLabel("Ready. Specify a date range to fetch.")
-        self.lbl_status.setStyleSheet("font-size: 13px; color: #444;")
+        self.lbl_status.setStyleSheet("font-size: 13px; color: #94a3b8;")
         status_layout.addWidget(self.lbl_status)
 
         status_layout.addStretch()
 
         self.error_label = QLabel("")
-        self.error_label.setStyleSheet("color: red; font-weight: bold;")
+        self.error_label.setStyleSheet("color: #ef4444; font-weight: bold;")
         self.error_label.setVisible(False)
         status_layout.addWidget(self.error_label)
 
@@ -160,6 +158,11 @@ class DownloadWidget(QWidget):
 
         self.table = QTableWidget()
         self.table.setColumnCount(6)
+        self.table.setAlternatingRowColors(True)
+        v_header = self.table.verticalHeader()
+        if v_header is not None:
+            v_header.setDefaultSectionSize(30)
+            v_header.setVisible(False)
         self.table.setHorizontalHeaderLabels([
             "Market Date",
             "Outcome / Status",

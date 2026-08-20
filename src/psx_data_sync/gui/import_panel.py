@@ -88,12 +88,11 @@ class ImportWidget(QWidget):
         options_layout.addStretch()
 
         self.btn_dry_run = QPushButton("Dry Run (Plan Only)")
-        self.btn_dry_run.setStyleSheet("font-weight: bold;")
         self.btn_dry_run.clicked.connect(lambda: self.run_import(dry_run=True))
         options_layout.addWidget(self.btn_dry_run)
 
         self.btn_apply = QPushButton("Apply Import")
-        self.btn_apply.setStyleSheet("font-weight: bold; background-color: #0066cc; color: white;")
+        self.btn_apply.setProperty("accent", True)
         self.btn_apply.clicked.connect(lambda: self.run_import(dry_run=False))
         options_layout.addWidget(self.btn_apply)
 
@@ -104,18 +103,18 @@ class ImportWidget(QWidget):
         # Status Indicator & Error Display Bar
         status_layout = QHBoxLayout()
         self.lbl_status = QLabel("Ready. Select a source directory to begin.")
-        self.lbl_status.setStyleSheet("font-size: 13px; color: #444;")
+        self.lbl_status.setStyleSheet("font-size: 13px; color: #94a3b8;")
         status_layout.addWidget(self.lbl_status)
 
         status_layout.addStretch()
 
         self.error_label = QLabel("")
-        self.error_label.setStyleSheet("color: red; font-weight: bold;")
+        self.error_label.setStyleSheet("color: #ef4444; font-weight: bold;")
         self.error_label.setVisible(False)
         status_layout.addWidget(self.error_label)
 
         self.progress_bar = QProgressBar()
-        self.progress_bar.setRange(0, 0)  # Indeterminate
+        self.progress_bar.setRange(0, 0)
         self.progress_bar.setFixedWidth(150)
         self.progress_bar.setVisible(False)
         status_layout.addWidget(self.progress_bar)
@@ -160,6 +159,11 @@ class ImportWidget(QWidget):
 
         self.table = QTableWidget()
         self.table.setColumnCount(6)
+        self.table.setAlternatingRowColors(True)
+        v_header = self.table.verticalHeader()
+        if v_header is not None:
+            v_header.setDefaultSectionSize(30)
+            v_header.setVisible(False)
         self.table.setHorizontalHeaderLabels([
             "Market Date",
             "Filename",

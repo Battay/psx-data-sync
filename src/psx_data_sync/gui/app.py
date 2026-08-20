@@ -10,6 +10,7 @@ from PySide6.QtWidgets import QApplication
 from ..config import Settings
 from ..state_db import StateRepository
 from .main_window import PSXMainWindow
+from .theme import apply_dark_theme
 
 
 def create_app(args: Sequence[str] | None = None) -> QApplication:
@@ -19,6 +20,7 @@ def create_app(args: Sequence[str] | None = None) -> QApplication:
     if app is None:
         sys_args = list(args) if args is not None else sys.argv
         app = QApplication(sys_args)
+        apply_dark_theme(app)
     return app
 
 

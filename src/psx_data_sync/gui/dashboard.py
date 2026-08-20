@@ -36,23 +36,25 @@ class MetricCard(QFrame):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
-        self.setFrameShape(QFrame.Shape.StyledPanel)
-        self.setFrameShadow(QFrame.Shadow.Raised)
+        self.setStyleSheet(
+            "QFrame { background-color: #1e293b; border: 1px solid #334155; border-radius: 8px; }"
+        )
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(6)
 
         self.title_label = QLabel(title)
-        self.title_label.setStyleSheet("font-weight: bold; color: #555;")
+        self.title_label.setStyleSheet("font-size: 12px; font-weight: 600; color: #94a3b8; border: none;")
         layout.addWidget(self.title_label)
 
         self.value_label = QLabel(value)
-        self.value_label.setStyleSheet("font-size: 20px; font-weight: bold; color: #111;")
+        self.value_label.setStyleSheet("font-size: 22px; font-weight: 700; color: #f8fafc; border: none;")
         layout.addWidget(self.value_label)
 
         if subtitle:
             self.sub_label = QLabel(subtitle)
-            self.sub_label.setStyleSheet("font-size: 11px; color: #777;")
+            self.sub_label.setStyleSheet("font-size: 11px; color: #64748b; border: none;")
             layout.addWidget(self.sub_label)
 
     def set_value(self, value: str) -> None:
