@@ -3,9 +3,17 @@
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
+
+
+def default_app_data_dir() -> Path:
+    """Return default user-writable data directory when packaged as a macOS standalone app."""
+    if getattr(sys, "frozen", False) and sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "PSX Data Sync"
+    return Path(".")
 
 
 CANONICAL_COLUMNS: tuple[str, ...] = (
@@ -131,6 +139,23 @@ class Settings:
                 f"{MAX_RECHECKS_PER_DATE_PER_RUN}"
             )
 
+        base_dir = default_app_data_dir()
+        default_raw = (
+            base_dir / "data" / "raw"
+            if getattr(sys, "frozen", False)
+            else defaults.raw_output_dir
+        )
+        default_db = (
+            base_dir / "data" / "state" / "psx_sync.db"
+            if getattr(sys, "frozen", False)
+            else defaults.state_db_path
+        )
+        default_staging = (
+            base_dir / "data" / "state" / "repair_staging"
+            if getattr(sys, "frozen", False)
+            else defaults.repair_staging_dir
+        )
+
         return cls(
             historical_url=historical_url,
             request_timeout_seconds=_positive_float(
@@ -162,15 +187,13 @@ class Settings:
             ),
             user_agent=values.get("PSX_USER_AGENT", defaults.user_agent),
             raw_output_dir=Path(
-                values.get("PSX_RAW_OUTPUT_DIR", str(defaults.raw_output_dir))
+                values.get("PSX_RAW_OUTPUT_DIR", str(default_raw))
             ).expanduser(),
             state_db_path=Path(
-                values.get("PSX_STATE_DB_PATH", str(defaults.state_db_path))
+                values.get("PSX_STATE_DB_PATH", str(default_db))
             ).expanduser(),
             repair_staging_dir=Path(
-                values.get(
-                    "PSX_REPAIR_STAGING_DIR", str(defaults.repair_staging_dir)
-                )
+                values.get("PSX_REPAIR_STAGING_DIR", str(default_staging))
             ).expanduser(),
             max_rechecks_per_date_per_run=max_rechecks,
             reconciliation_cooldown_seconds=_non_negative_float(

@@ -7,10 +7,10 @@ from typing import Sequence
 
 from PySide6.QtWidgets import QApplication
 
-from ..config import Settings
-from ..state_db import StateRepository
-from .main_window import PSXMainWindow
-from .theme import apply_dark_theme
+from psx_data_sync.config import Settings
+from psx_data_sync.gui.main_window import PSXMainWindow
+from psx_data_sync.gui.theme import apply_dark_theme
+from psx_data_sync.state_db import StateRepository
 
 
 def create_app(args: Sequence[str] | None = None) -> QApplication:
