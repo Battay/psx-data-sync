@@ -37,6 +37,12 @@ from .state import (
     ReconciliationRangeResult,
     StateSummary,
 )
+from .importer import (
+    BatchImportResult,
+    LocalFileImportResult,
+    LocalImportAction,
+    import_local_csv_directory,
+)
 from .parquet_sync import (
     DateParquetSyncResult,
     ParquetExportAction,
@@ -1109,6 +1115,194 @@ def export_parquet_command(
 
     if not result.synchronized:
         raise typer.Exit(code=3)
+
+
+def _render_import_error(
+    category: str,
+    message: str,
+    *,
+    json_output: bool,
+) -> None:
+    if json_output:
+        typer.echo(
+            json.dumps(
+                {"category": category, "error": message},
+                sort_keys=True,
+            )
+        )
+        return
+    console.print(f"[bold red]{category}:[/bold red] {message}")
+
+
+def batch_import_result_to_dict(result: BatchImportResult) -> dict[str, Any]:
+    return {
+        "source_dir": str(result.source_dir),
+        "destination_dir": str(result.destination_dir),
+        "mode": "DRY_RUN" if result.dry_run else "APPLY",
+        "discovered_count": result.discovered_count,
+        "candidate_count": result.candidate_count,
+        "importable_count": result.importable_count,
+        "imported_count": result.imported_count,
+        "already_present_count": result.already_present_count,
+        "invalid_count": result.invalid_count,
+        "conflict_count": result.conflict_count,
+        "unsupported_count": result.unsupported_count,
+        "failed_count": result.failed_count,
+        "duration_ms": round(result.duration_ms, 2),
+        "results": [
+            {
+                "source_path": str(r.source_path),
+                "market_date": r.market_date,
+                "action": r.action.value if hasattr(r.action, "value") else str(r.action),
+                "valid": r.valid,
+                "row_count": r.row_count,
+                "rejected_row_count": r.rejected_row_count,
+                "source_checksum": r.source_checksum,
+                "destination_path": (
+                    str(r.destination_path) if r.destination_path else None
+                ),
+                "destination_checksum": r.destination_checksum,
+                "imported": r.imported,
+                "warnings": list(r.warnings),
+                "error": r.error,
+            }
+            for r in result.results
+        ],
+    }
+
+
+def render_batch_import_result(result: BatchImportResult) -> None:
+    mode_str = "DRY_RUN (planning only)" if result.dry_run else "APPLY (actual import)"
+    console.print("[bold]PSX Data Sync — Local Historical CSV Import[/bold]\n")
+    table = Table.grid(padding=(0, 2))
+    table.add_column(style="bold")
+    table.add_column(justify="right")
+
+    table.add_row("Source directory:", str(result.source_dir))
+    table.add_row("Destination directory:", str(result.destination_dir))
+    table.add_row("Mode:", mode_str)
+    table.add_row("Discovered files:", f"{result.discovered_count:,}")
+    table.add_row("Candidate CSVs:", f"{result.candidate_count:,}")
+    table.add_row(
+        "Imported (new):" if not result.dry_run else "Importable (new):",
+        f"{result.imported_count if not result.dry_run else result.importable_count:,}",
+    )
+    table.add_row("Already present:", f"{result.already_present_count:,}")
+    table.add_row("Invalid source files:", f"{result.invalid_count:,}")
+    table.add_row("Conflicts:", f"{result.conflict_count:,}")
+    table.add_row("Unsupported files:", f"{result.unsupported_count:,}")
+    table.add_row("Failed:", f"{result.failed_count:,}")
+    table.add_row("Duration:", f"{result.duration_ms:.2f} ms")
+    console.print(table)
+
+    if result.results:
+        details = Table(title="Import candidate files")
+        details.add_column("Source File")
+        details.add_column("Date")
+        details.add_column("Action")
+        details.add_column("Rows", justify="right")
+        details.add_column("Imported", justify="center")
+
+        for item in result.results:
+            details.add_row(
+                item.source_path.name,
+                item.market_date or "—",
+                item.action.value if hasattr(item.action, "value") else str(item.action),
+                f"{item.row_count:,}" if item.row_count is not None else "—",
+                "✓" if item.imported else "—",
+            )
+        console.print("\n", details)
+
+
+@app.command("import-csv")
+def import_csv_command(
+    source: Annotated[
+        Path,
+        typer.Option(
+            "--source",
+            "-src",
+            help="Directory containing historical canonical CSV files.",
+            exists=True,
+            file_okay=False,
+            dir_okay=True,
+            readable=True,
+            resolve_path=True,
+        ),
+    ],
+    apply_changes: Annotated[
+        bool,
+        typer.Option(
+            "--apply",
+            help="Perform actual atomic file imports and state database indexing.",
+        ),
+    ] = False,
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run",
+            help="Perform planning and validation only without mutating files or database.",
+        ),
+    ] = False,
+    recursive: Annotated[
+        bool,
+        typer.Option(
+            "--recursive",
+            "-r",
+            help="Scan source directory recursively for CSV files.",
+        ),
+    ] = False,
+    json_output: Annotated[
+        bool,
+        typer.Option(
+            "--json",
+            help="Emit a clean machine-readable JSON report.",
+        ),
+    ] = False,
+) -> None:
+    """Import historical canonical CSV files from a local directory."""
+
+    effective_dry_run = True if (dry_run or not apply_changes) else False
+
+    try:
+        settings = Settings.from_env()
+    except ValueError as exc:
+        _render_import_error("Configuration error", str(exc), json_output=json_output)
+        raise typer.Exit(code=1) from exc
+
+    try:
+        repository = _repository_from_settings(settings)
+        result = import_local_csv_directory(
+            repository,
+            source,
+            destination_dir=settings.raw_output_dir,
+            dry_run=effective_dry_run,
+            recursive=recursive,
+        )
+    except FileNotFoundError as exc:
+        _render_import_error("Input error", str(exc), json_output=json_output)
+        raise typer.Exit(code=2) from exc
+    except KeyboardInterrupt as exc:
+        _render_import_error(
+            "Interrupted", "operation cancelled by user", json_output=json_output
+        )
+        raise typer.Exit(code=130) from exc
+    except Exception as exc:
+        _render_import_error("Import error", str(exc), json_output=json_output)
+        raise typer.Exit(code=1) from exc
+
+    if json_output:
+        typer.echo(
+            json.dumps(
+                batch_import_result_to_dict(result),
+                indent=2,
+                sort_keys=True,
+            )
+        )
+    else:
+        render_batch_import_result(result)
+
+    if result.invalid_count or result.conflict_count or result.failed_count:
+        raise typer.Exit(code=1)
 
 
 def _repository_from_settings(settings: Settings) -> StateRepository:

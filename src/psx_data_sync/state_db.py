@@ -2743,6 +2743,74 @@ class StateRepository:
             files=tuple(outcomes),
         )
 
+    def index_local_file(
+        self,
+        path: Path,
+        columns: tuple[str, ...] = CANONICAL_COLUMNS,
+    ) -> PersistentSyncStatus:
+        """Index a single local canonical CSV file into date_sync_state safely."""
+
+        path = Path(path)
+        match = MARKET_FILE_PATTERN.fullmatch(path.name)
+        if match is None:
+            raise StateDatabaseError(
+                f"cannot index file with unsupported name: {path.name}"
+            )
+        date_text = match.group(1)
+        try:
+            market_date = date.fromisoformat(date_text)
+        except ValueError as exc:
+            raise StateDatabaseError(
+                f"cannot index file with invalid calendar date: {path.name}"
+            ) from exc
+
+        inspection = inspect_existing_canonical_file(
+            market_date, path.parent, columns=columns
+        )
+        if not inspection.valid:
+            message = inspection.error or "invalid canonical CSV"
+            self._set_artifact_state(
+                date_text,
+                PersistentSyncStatus.FILE_CORRUPT,
+                path=inspection.path,
+                error_type="FILE_CORRUPT",
+                error_message=message,
+            )
+            return PersistentSyncStatus.FILE_CORRUPT
+
+        current = self.get_date_state(date_text)
+        has_verified_identity = (
+            current is not None
+            and current.last_verified_at is not None
+            and current.csv_checksum_sha256 is not None
+        )
+        if (
+            has_verified_identity
+            and current is not None
+            and current.csv_checksum_sha256 != inspection.checksum
+        ):
+            message = (
+                "verified database checksum differs from canonical CSV; "
+                "state identity preserved"
+            )
+            self._set_artifact_state(
+                date_text,
+                PersistentSyncStatus.FILE_CONFLICT,
+                error_type="CHECKSUM_MISMATCH",
+                error_message=message,
+                preserve_artifact=True,
+            )
+            return PersistentSyncStatus.FILE_CONFLICT
+
+        self._set_artifact_state(
+            date_text,
+            PersistentSyncStatus.VERIFIED_TRADING_DATA,
+            row_count=inspection.row_count,
+            checksum=inspection.checksum,
+            path=inspection.path,
+        )
+        return PersistentSyncStatus.VERIFIED_TRADING_DATA
+
     def finish_sync_run(
         self,
         run_id: str,
@@ -4846,6 +4914,9 @@ class AsyncStateRepository:
         await self.run_serialized(
             self.repository.record_staged_download_result, run_id, result
         )
+
+    async def index_local_file(self, path: Path) -> PersistentSyncStatus:
+        return await self.run_serialized(self.repository.index_local_file, path)
 
     async def get_parquet_export(
         self, market_date: str | date
