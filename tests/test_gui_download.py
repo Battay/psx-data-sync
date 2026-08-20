@@ -80,6 +80,8 @@ def test_download_widget_construction_no_network(qapp: QApplication, tmp_path: P
         widget = DownloadWidget(repo)
         assert widget.txt_start_date is not None
         assert widget.txt_end_date is not None
+        assert widget.txt_start_date.calendarPopup() is True
+        assert widget.txt_start_date.displayFormat() == "yyyy-MM-dd"
         assert widget.spin_workers.value() == DEFAULT_RANGE_WORKERS
         assert widget.table.columnCount() == 6
         mock_backend.assert_not_called()
@@ -91,15 +93,9 @@ def test_date_validation_errors(qapp: QApplication, tmp_path: Path) -> None:
 
     widget = DownloadWidget(repo)
 
-    # Invalid date format
-    widget.txt_start_date.setText("invalid-date")
-    widget.txt_end_date.setText("2026-08-05")
-    widget.run_download()
-    assert "Invalid date format" in widget.error_label.text()
-
     # Start date after end date
-    widget.txt_start_date.setText("2026-08-10")
-    widget.txt_end_date.setText("2026-08-05")
+    widget.txt_start_date.set_date_val("2026-08-10")
+    widget.txt_end_date.set_date_val("2026-08-05")
     widget.run_download()
     assert "Start date cannot be after end date" in widget.error_label.text()
 
@@ -112,8 +108,8 @@ def test_large_range_confirmation_cancellation_aborts_download(
 
     widget = DownloadWidget(repo)
     # Range > 90 days (100 days)
-    widget.txt_start_date.setText("2026-01-01")
-    widget.txt_end_date.setText("2026-04-10")
+    widget.txt_start_date.set_date_val("2026-01-01")
+    widget.txt_end_date.set_date_val("2026-04-10")
 
     with patch("psx_data_sync.gui.download_panel.run_range_download") as mock_backend:
         with patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.No):
@@ -131,8 +127,8 @@ def test_successful_range_download_and_control_locking(
 
     callback_mock = MagicMock()
     widget = DownloadWidget(repo, on_download_success=callback_mock)
-    widget.txt_start_date.setText("2026-08-01")
-    widget.txt_end_date.setText("2026-08-02")
+    widget.txt_start_date.set_date_val("2026-08-01")
+    widget.txt_end_date.set_date_val("2026-08-02")
     widget.spin_workers.setValue(4)
 
     dummy_res = _dummy_range_result()
@@ -175,8 +171,8 @@ def test_download_error_handling_restores_controls(
     repo.initialize()
 
     widget = DownloadWidget(repo)
-    widget.txt_start_date.setText("2026-08-01")
-    widget.txt_end_date.setText("2026-08-02")
+    widget.txt_start_date.set_date_val("2026-08-01")
+    widget.txt_end_date.set_date_val("2026-08-02")
 
     with patch("psx_data_sync.gui.download_panel.run_range_download", side_effect=RuntimeError("Synthetic network failure")):
         widget.run_download()

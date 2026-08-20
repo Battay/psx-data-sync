@@ -30,6 +30,7 @@ from ..config import DEFAULT_RANGE_WORKERS, MAX_RANGE_WORKERS, MIN_RANGE_WORKERS
 from ..downloader import validate_requested_date
 from ..state import RangeDownloadResult
 from .dashboard import MetricCard
+from .widgets import PSXDateEdit
 from .workers import BaseWorker
 
 if TYPE_CHECKING:
@@ -73,18 +74,14 @@ class DownloadWidget(QWidget):
         lbl_start.setStyleSheet("font-weight: bold;")
         controls_layout.addWidget(lbl_start)
 
-        self.txt_start_date = QLineEdit(default_start)
-        self.txt_start_date.setPlaceholderText("YYYY-MM-DD")
-        self.txt_start_date.setFixedWidth(110)
+        self.txt_start_date = PSXDateEdit(default_start)
         controls_layout.addWidget(self.txt_start_date)
 
         lbl_end = QLabel("End Date:")
         lbl_end.setStyleSheet("font-weight: bold;")
         controls_layout.addWidget(lbl_end)
 
-        self.txt_end_date = QLineEdit(default_end)
-        self.txt_end_date.setPlaceholderText("YYYY-MM-DD")
-        self.txt_end_date.setFixedWidth(110)
+        self.txt_end_date = PSXDateEdit(default_end)
         controls_layout.addWidget(self.txt_end_date)
 
         lbl_workers = QLabel("Workers:")
@@ -200,8 +197,8 @@ class DownloadWidget(QWidget):
         if self.active_worker is not None and self.active_worker.isRunning():
             return
 
-        start_str = self.txt_start_date.text().strip()
-        end_str = self.txt_end_date.text().strip()
+        start_str = self.txt_start_date.date_str
+        end_str = self.txt_end_date.date_str
         workers = self.spin_workers.value()
 
         try:

@@ -125,8 +125,8 @@ QPushButton[accent="true"]:disabled {
     border-color: #334155;
 }
 
-/* Inputs & Spinboxes */
-QLineEdit, QSpinBox {
+/* Inputs, Spinboxes & Date Edits */
+QLineEdit, QSpinBox, QDateEdit {
     background-color: #0f172a;
     color: #f8fafc;
     border: 1px solid #334155;
@@ -135,13 +135,48 @@ QLineEdit, QSpinBox {
     font-size: 13px;
 }
 
-QLineEdit:focus, QSpinBox:focus {
+QLineEdit:focus, QSpinBox:focus, QDateEdit:focus {
     border: 1px solid #3b82f6;
 }
 
-QLineEdit:disabled, QSpinBox:disabled {
+QLineEdit:disabled, QSpinBox:disabled, QDateEdit:disabled {
     background-color: #1e293b;
     color: #64748b;
+}
+
+/* Calendar Widget Popup */
+QCalendarWidget QWidget#qt_calendar_navigationbar {
+    background-color: #1e293b;
+    border-bottom: 1px solid #334155;
+}
+
+QCalendarWidget QToolButton {
+    color: #f8fafc;
+    background-color: #1e293b;
+    border: none;
+    border-radius: 4px;
+    padding: 4px 8px;
+}
+
+QCalendarWidget QToolButton:hover {
+    background-color: #334155;
+}
+
+QCalendarWidget QSpinBox {
+    background-color: #0f172a;
+    color: #f8fafc;
+}
+
+QCalendarWidget QAbstractItemView:enabled {
+    background-color: #0f172a;
+    color: #f8fafc;
+    selection-background-color: #3b82f6;
+    selection-color: #ffffff;
+    outline: none;
+}
+
+QCalendarWidget QAbstractItemView:disabled {
+    color: #475569;
 }
 
 /* Checkboxes */

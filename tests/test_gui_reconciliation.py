@@ -144,6 +144,8 @@ def test_reconciliation_widget_construction_no_network(
         widget = ReconciliationWidget(repo)
         assert widget.txt_start_date is not None
         assert widget.txt_end_date is not None
+        assert widget.txt_start_date.calendarPopup() is True
+        assert widget.txt_start_date.displayFormat() == "yyyy-MM-dd"
         assert widget.spin_workers.value() == DEFAULT_RANGE_WORKERS
         assert widget.chk_force_recheck.isChecked() is False
         assert widget.table.columnCount() == 6
@@ -171,15 +173,9 @@ def test_date_validation_errors(qapp: QApplication, tmp_path: Path) -> None:
 
     widget = ReconciliationWidget(repo)
 
-    # Invalid start date
-    widget.txt_start_date.setText("invalid-date")
-    widget.txt_end_date.setText("2026-08-05")
-    widget.run_reconcile(apply=False)
-    assert "Invalid date format" in widget.error_label.text()
-
     # Start date after end date
-    widget.txt_start_date.setText("2026-08-10")
-    widget.txt_end_date.setText("2026-08-05")
+    widget.txt_start_date.set_date_val("2026-08-10")
+    widget.txt_end_date.set_date_val("2026-08-05")
     widget.run_reconcile(apply=False)
     assert "Start date cannot be after end date" in widget.error_label.text()
 
@@ -192,8 +188,8 @@ def test_large_range_confirmation_cancellation_aborts_reconciliation(
 
     widget = ReconciliationWidget(repo)
     # Range > 90 days (100 days)
-    widget.txt_start_date.setText("2026-01-01")
-    widget.txt_end_date.setText("2026-04-10")
+    widget.txt_start_date.set_date_val("2026-01-01")
+    widget.txt_end_date.set_date_val("2026-04-10")
 
     with patch("psx_data_sync.gui.reconciliation_panel.run_reconciliation") as mock_backend:
         with patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.No):
@@ -210,8 +206,8 @@ def test_apply_mode_confirmation_cancellation_aborts_action(
     repo.initialize()
 
     widget = ReconciliationWidget(repo)
-    widget.txt_start_date.setText("2026-08-01")
-    widget.txt_end_date.setText("2026-08-02")
+    widget.txt_start_date.set_date_val("2026-08-01")
+    widget.txt_end_date.set_date_val("2026-08-02")
 
     with patch("psx_data_sync.gui.reconciliation_panel.run_reconciliation") as mock_backend:
         with patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.No):
@@ -226,8 +222,8 @@ def test_dry_run_reconciliation_execution(qapp: QApplication, tmp_path: Path) ->
     repo.initialize()
 
     widget = ReconciliationWidget(repo)
-    widget.txt_start_date.setText("2026-08-01")
-    widget.txt_end_date.setText("2026-08-02")
+    widget.txt_start_date.set_date_val("2026-08-01")
+    widget.txt_end_date.set_date_val("2026-08-02")
 
     dummy_res = _dummy_reconciliation_result(mode=ReconciliationMode.DRY_RUN)
 
@@ -260,8 +256,8 @@ def test_apply_reconciliation_execution_and_callback(
 
     callback_mock = MagicMock()
     widget = ReconciliationWidget(repo, on_reconcile_success=callback_mock)
-    widget.txt_start_date.setText("2026-08-01")
-    widget.txt_end_date.setText("2026-08-02")
+    widget.txt_start_date.set_date_val("2026-08-01")
+    widget.txt_end_date.set_date_val("2026-08-02")
     widget.chk_force_recheck.setChecked(True)
 
     dummy_res = _dummy_reconciliation_result(mode=ReconciliationMode.APPLY)
