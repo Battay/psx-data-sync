@@ -1316,6 +1316,7 @@ def _repository_from_settings(settings: Settings) -> StateRepository:
     repository = StateRepository(
         settings.state_db_path,
         project_root=project_root,
+        raw_output_dir=settings.raw_output_dir,
         source_endpoint=settings.historical_url,
     )
     repository.initialize()

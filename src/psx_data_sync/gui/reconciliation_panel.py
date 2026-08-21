@@ -272,7 +272,7 @@ class ReconciliationWidget(QWidget):
 
         settings = Settings(
             state_db_path=self.repository.database_path,
-            raw_output_dir=self.repository.project_root / "data" / "raw",
+            raw_output_dir=self.repository.raw_output_dir,
         )
 
         worker = BaseWorker(

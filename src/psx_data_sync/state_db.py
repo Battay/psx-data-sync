@@ -19,6 +19,7 @@ from collections.abc import Iterable
 from dataclasses import asdict
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 from . import __version__
 from .config import CANONICAL_COLUMNS, Settings
@@ -557,7 +558,7 @@ def persistent_status_for_download(status: DownloadStatus) -> PersistentSyncStat
 
 
 def _has_trusted_artifact_identity(state: DateSyncState | None) -> bool:
-    return bool(
+    return (
         state is not None
         and state.last_verified_at is not None
         and state.csv_checksum_sha256 is not None
@@ -571,7 +572,7 @@ def _matches_trusted_artifact_identity(
     checksum: str | None,
     row_count: int,
 ) -> bool:
-    return bool(
+    return (
         _has_trusted_artifact_identity(state)
         and checksum == state.csv_checksum_sha256
         and row_count == state.valid_row_count
@@ -669,27 +670,42 @@ def _validate_artifact_snapshot(
 def _serialized_reconciliation_evidence(
     result: DateReconciliationResult,
 ) -> str:
-    evidence = asdict(result.evidence_summary)
-    # Attempts are retained losslessly in ``download_attempts``.  Decision
+    evidence: dict[str, Any] = asdict(result.evidence_summary)
+    # Attempts are retained losslessly in ``download_attempts``. Decision
     # events deliberately keep a compact aggregate plus a bounded recent tail
     # so a long-lived date can always be reconciled without hitting the event
     # size guard.
     history_limit = 50
-    for key, count_key in (
-        ("http_statuses", "http_status_counts"),
-        ("response_classifications", "response_classification_counts"),
-    ):
-        values = list(evidence[key])
-        counts: dict[str, int] = {}
-        for value in values:
-            label = str(value)
-            counts[label] = counts.get(label, 0) + 1
-        evidence[count_key] = dict(sorted(counts.items()))
-        evidence[f"{key}_total_count"] = len(values)
-        evidence[f"{key}_truncated_count"] = max(
-            len(values) - history_limit, 0
-        )
-        evidence[key] = values[-history_limit:]
+
+    http_statuses = list(result.evidence_summary.http_statuses)
+    status_counts: dict[str, int] = {}
+    for s in http_statuses:
+        label = str(s)
+        status_counts[label] = status_counts.get(label, 0) + 1
+    evidence["http_status_counts"] = dict(sorted(status_counts.items()))
+    evidence["http_statuses_total_count"] = len(http_statuses)
+    evidence["http_statuses_truncated_count"] = max(
+        len(http_statuses) - history_limit, 0
+    )
+    evidence["http_statuses"] = http_statuses[-history_limit:]
+
+    response_classifications = list(
+        result.evidence_summary.response_classifications
+    )
+    class_counts: dict[str, int] = {}
+    for c in response_classifications:
+        class_counts[c] = class_counts.get(c, 0) + 1
+    evidence["response_classification_counts"] = dict(sorted(class_counts.items()))
+    evidence["response_classifications_total_count"] = len(
+        response_classifications
+    )
+    evidence["response_classifications_truncated_count"] = max(
+        len(response_classifications) - history_limit, 0
+    )
+    evidence["response_classifications"] = response_classifications[
+        -history_limit:
+    ]
+
     evidence["reasons"] = result.reasons
     evidence["warnings"] = result.warnings
     serialized = json.dumps(evidence, sort_keys=True, separators=(",", ":"))
@@ -779,11 +795,22 @@ class StateRepository:
         database_path: Path,
         *,
         project_root: Path | None = None,
+        raw_output_dir: Path | None = None,
         source_endpoint: str = Settings().historical_url,
         application_version: str = __version__,
     ) -> None:
         self.database_path = Path(database_path)
         self.project_root = (project_root or Path.cwd()).resolve()
+        if raw_output_dir is not None:
+            self.raw_output_dir = Path(raw_output_dir).resolve()
+        elif "PSX_RAW_OUTPUT_DIR" in os.environ:
+            self.raw_output_dir = (
+                Path(os.environ["PSX_RAW_OUTPUT_DIR"]).expanduser().resolve()
+            )
+        elif project_root is not None:
+            self.raw_output_dir = (self.project_root / "data" / "raw").resolve()
+        else:
+            self.raw_output_dir = Settings.from_env().raw_output_dir.resolve()
         self.source_endpoint = source_endpoint
         self.application_version = application_version
 
@@ -1806,9 +1833,9 @@ class StateRepository:
             ).fetchone()
             assert row is not None
             current = self._state_from_row(row)
-            historical_identity = bool(
-                current.last_verified_at
-                or current.csv_checksum_sha256
+            historical_identity = (
+                current.last_verified_at is not None
+                or current.csv_checksum_sha256 is not None
                 or current.status
                 in {
                     *VERIFIED_STATUSES,
@@ -2568,10 +2595,10 @@ class StateRepository:
             )
 
         trusted_identity = _has_trusted_artifact_identity(current)
-        persisted_artifact_issue = bool(
+        persisted_artifact_issue = (
             current is not None and current.status in ARTIFACT_ISSUE_STATUSES
         )
-        verified_state = bool(
+        verified_state = (
             current is not None and current.status in VERIFIED_STATUSES
         )
         if current is not None and (verified_state or trusted_identity):
@@ -3793,9 +3820,9 @@ class StateRepository:
             )
         current_status = PersistentSyncStatus(state_row["status"])
         if prior_checksum is not None:
-            trusted = bool(
-                state_row["last_verified_at"]
-                and state_row["csv_checksum_sha256"]
+            trusted = (
+                state_row["last_verified_at"] is not None
+                and state_row["csv_checksum_sha256"] is not None
                 and state_row["valid_row_count"] > 0
             )
             if not trusted:
@@ -4326,6 +4353,9 @@ class StateRepository:
         recovered: list[tuple[str, str]] = []
         for candidate in rows:
             market_date = candidate["market_date"]
+            disposition: str = "RECOVERY_STAGED_INVALID"
+            validation_state: str = "INVALID"
+            message: str = "unknown recovery state"
             destination_path = Path(output_dir) / f"market_{market_date}.csv"
             staged_path = (
                 self.project_root / candidate["staged_relative_path"]

@@ -237,7 +237,7 @@ class ImportWidget(QWidget):
         self.progress_bar.setVisible(True)
         self._set_controls_enabled(False)
 
-        raw_dir = self.repository.project_root / "data" / "raw"
+        raw_dir = self.repository.raw_output_dir
         recursive = self.chk_recursive.isChecked()
 
         worker = BaseWorker(

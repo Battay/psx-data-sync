@@ -350,8 +350,11 @@ def import_local_csv_file(
 ) -> LocalFileImportResult:
     """Evaluate and optionally import a single local CSV file."""
 
-    source_path = Path(source_path).resolve()
-    dest_dir = (destination_dir or repository.project_root / "data" / "raw").resolve()
+    default_dest = (
+        getattr(repository, "raw_output_dir", None)
+        or Settings.from_env().raw_output_dir
+    )
+    dest_dir = (destination_dir or default_dest).resolve()
 
     match = MARKET_FILE_PATTERN.fullmatch(source_path.name)
     if match is None:
@@ -673,7 +676,11 @@ def import_local_csv_directory(
     """Scan and import historical canonical CSV files from a directory."""
 
     source_dir = Path(source_dir).resolve()
-    dest_dir = (destination_dir or repository.project_root / "data" / "raw").resolve()
+    default_dest = (
+        getattr(repository, "raw_output_dir", None)
+        or Settings.from_env().raw_output_dir
+    )
+    dest_dir = (destination_dir or default_dest).resolve()
 
     if not source_dir.exists() or not source_dir.is_dir():
         raise FileNotFoundError(

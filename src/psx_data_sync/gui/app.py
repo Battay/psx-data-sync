@@ -16,12 +16,15 @@ from psx_data_sync.state_db import StateRepository
 def create_app(args: Sequence[str] | None = None) -> QApplication:
     """Create or retrieve a QApplication instance safely."""
 
-    app = QApplication.instance()
-    if app is None:
+    existing = QApplication.instance()
+    if existing is None:
         sys_args = list(args) if args is not None else sys.argv
         app = QApplication(sys_args)
         apply_dark_theme(app)
-    return app
+        return app
+    if not isinstance(existing, QApplication):
+        raise RuntimeError("Existing Qt application is not a QApplication")
+    return existing
 
 
 def main(
@@ -44,6 +47,7 @@ def main(
         repository = StateRepository(
             settings.state_db_path,
             project_root=project_root,
+            raw_output_dir=settings.raw_output_dir,
             source_endpoint=settings.historical_url,
         )
         repository.initialize()
