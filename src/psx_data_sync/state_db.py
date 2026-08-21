@@ -1429,7 +1429,21 @@ class StateRepository:
         if path is None:
             return None
         absolute = path.resolve()
-        return Path(os.path.relpath(absolute, self.project_root)).as_posix()
+        try:
+            rel = Path(os.path.relpath(absolute, self.project_root)).as_posix()
+            if not rel.startswith(".."):
+                return rel
+        except ValueError:
+            pass
+
+        try:
+            rel_raw = Path(os.path.relpath(absolute, self.raw_output_dir)).as_posix()
+            if not rel_raw.startswith(".."):
+                return (Path("data/raw") / rel_raw).as_posix()
+        except ValueError:
+            pass
+
+        return absolute.as_posix()
 
     def _ensure_date_state(
         self, connection: sqlite3.Connection, market_date: str, now: str

@@ -228,13 +228,31 @@ def sync_parquet_date(
             rebuilt_or_written=False,
         )
 
-    # Date state status is VERIFIED_TRADING_DATA. Inspect the CSV file.
-    csv_rel = date_state.csv_relative_path
-    csv_path = (repository.project_root / csv_rel).resolve() if csv_rel else None
+    # Date state status is VERIFIED_TRADING_DATA. Locate and inspect the CSV file.
+    canonical_raw_path = (
+        repository.raw_output_dir / f"market_{date_text}.csv"
+    ).resolve()
+
+    csv_path: Path | None = None
+    if canonical_raw_path.exists():
+        csv_path = canonical_raw_path
+    elif date_state.csv_relative_path:
+        rel_candidate = (
+            repository.project_root / date_state.csv_relative_path
+        ).resolve()
+        if rel_candidate.exists():
+            csv_path = rel_candidate
+
+    if csv_path is None:
+        csv_path = (
+            (repository.project_root / date_state.csv_relative_path).resolve()
+            if date_state.csv_relative_path
+            else canonical_raw_path
+        )
 
     source_invalid = False
     source_error = None
-    if csv_path is None or not csv_path.exists():
+    if not csv_path.exists():
         source_invalid = True
         source_error = f"canonical CSV missing: {csv_path}"
     else:
@@ -242,21 +260,40 @@ def sync_parquet_date(
         if not inspection.exists or not inspection.valid:
             source_invalid = True
             source_error = inspection.error or "canonical CSV is invalid"
-        elif inspection.checksum != date_state.csv_checksum_sha256:
-            source_invalid = True
-            source_error = (
-                f"checksum mismatch: CSV {inspection.checksum} != "
-                f"DB {date_state.csv_checksum_sha256}"
-            )
-        elif inspection.row_count != date_state.valid_row_count:
-            source_invalid = True
-            source_error = (
-                f"row count mismatch: CSV {inspection.row_count} != "
-                f"DB {date_state.valid_row_count}"
-            )
         elif inspection.row_count <= 0:
             source_invalid = True
             source_error = "canonical CSV contains 0 rows"
+        else:
+            # Source CSV is valid on disk. Check database metadata match.
+            if (
+                date_state.csv_checksum_sha256 != inspection.checksum
+                or date_state.valid_row_count != inspection.row_count
+            ):
+                if not dry_run:
+                    repository.index_local_file(csv_path)
+                    refreshed_state = repository.get_date_state(date_text)
+                    if refreshed_state:
+                        date_state = refreshed_state
+
+            expected_checksum = date_state.csv_checksum_sha256 or (
+                inspection.checksum if inspection.valid else None
+            )
+            expected_row_count = date_state.valid_row_count or (
+                inspection.row_count if inspection.valid else None
+            )
+
+            if inspection.checksum != expected_checksum:
+                source_invalid = True
+                source_error = (
+                    f"checksum mismatch: CSV {inspection.checksum} != "
+                    f"DB {expected_checksum}"
+                )
+            elif inspection.row_count != expected_row_count:
+                source_invalid = True
+                source_error = (
+                    f"row count mismatch: CSV {inspection.row_count} != "
+                    f"DB {expected_row_count}"
+                )
 
     if source_invalid:
         return DateParquetSyncResult(

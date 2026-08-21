@@ -541,3 +541,99 @@ def test_canonical_csv_hashes_unchanged_after_apply_and_rebuild(
 
     sync_parquet_date(repo, "2026-08-07", dry_run=False, rebuild=True)
     assert csv_path.read_bytes() == hash_before
+
+
+def test_custom_raw_output_dir_parquet_sync(tmp_path: Path) -> None:
+    """Verify Parquet sync respects repository.raw_output_dir and avoids false SOURCE_INVALID."""
+    custom_raw_dir = tmp_path / "custom_raw"
+    db_path = tmp_path / "state" / "psx_sync.db"
+    repo = StateRepository(
+        db_path,
+        project_root=tmp_path / "app_root",
+        raw_output_dir=custom_raw_dir,
+    )
+    repo.initialize()
+
+    # Create a valid canonical CSV in custom raw output dir
+    custom_raw_dir.mkdir(parents=True, exist_ok=True)
+    csv_file = custom_raw_dir / "market_2026-08-20.csv"
+    csv_bytes = canonical_csv_bytes((_row("OGDC"),))
+    csv_file.write_bytes(csv_bytes)
+
+    # Index the local file so date_state exists
+    repo.index_local_file(csv_file)
+    date_state = repo.get_date_state("2026-08-20")
+    assert date_state is not None
+    assert date_state.status is PersistentSyncStatus.VERIFIED_TRADING_DATA
+
+    # Dry run should plan CREATE without SOURCE_INVALID
+    dry_res = sync_parquet_date(repo, "2026-08-20", dry_run=True)
+    assert dry_res.action is ParquetExportAction.CREATE
+    assert dry_res.source_csv_path is not None
+    assert dry_res.source_csv_path.resolve() == csv_file.resolve()
+
+    # Apply mode should CREATE parquet partition
+    apply_res = sync_parquet_date(repo, "2026-08-20", dry_run=False)
+    assert apply_res.action is ParquetExportAction.CREATE
+    assert apply_res.parquet_path is not None
+    assert apply_res.parquet_path.exists()
+
+    # Second dry run should produce NO_ACTION / CURRENT
+    second_res = sync_parquet_date(repo, "2026-08-20", dry_run=True)
+    assert second_res.action is ParquetExportAction.NO_ACTION
+
+
+def test_outdated_relative_path_does_not_cause_false_source_invalid(tmp_path: Path) -> None:
+    """Verify that an outdated or escaped relative path in DB falls back to raw_output_dir."""
+    custom_raw_dir = tmp_path / "raw"
+    custom_raw_dir.mkdir(parents=True, exist_ok=True)
+    csv_file = custom_raw_dir / "market_2026-08-20.csv"
+    csv_file.write_bytes(canonical_csv_bytes((_row("OGDC"),)))
+
+    repo = StateRepository(
+        tmp_path / "state.db",
+        project_root=tmp_path / "diff_root",
+        raw_output_dir=custom_raw_dir,
+    )
+    repo.initialize()
+    repo.index_local_file(csv_file)
+
+    # Corrupt DB csv_relative_path to point to a non-existent relative path
+    with sqlite3.connect(tmp_path / "state.db") as conn:
+        conn.execute(
+            "UPDATE date_sync_state SET csv_relative_path = '../../invalid/path/market_2026-08-20.csv' WHERE market_date = '2026-08-20'"
+        )
+
+    # Parquet sync should locate CSV via raw_output_dir and succeed
+    res = sync_parquet_date(repo, "2026-08-20", dry_run=True)
+    assert res.action is ParquetExportAction.CREATE
+    assert res.source_csv_path is not None
+    assert res.source_csv_path.resolve() == csv_file.resolve()
+
+
+def test_invalid_corrupt_csv_produces_source_invalid(tmp_path: Path) -> None:
+    """Verify that a genuinely corrupt CSV on disk produces SOURCE_INVALID."""
+    custom_raw_dir = tmp_path / "raw"
+    custom_raw_dir.mkdir(parents=True, exist_ok=True)
+    csv_file = custom_raw_dir / "market_2026-08-20.csv"
+    csv_file.write_text("invalid,csv,data\n1,2\n", encoding="utf-8")
+
+    repo = StateRepository(
+        tmp_path / "state.db",
+        project_root=tmp_path,
+        raw_output_dir=custom_raw_dir,
+    )
+    repo.initialize()
+
+    # Force status to VERIFIED_TRADING_DATA with dummy values
+    with sqlite3.connect(tmp_path / "state.db") as conn:
+        conn.execute(
+            """
+            INSERT INTO date_sync_state (market_date, status, evidence_state, source_endpoint, valid_row_count, csv_checksum_sha256, record_created_at, record_updated_at)
+            VALUES ('2026-08-20', 'VERIFIED_TRADING_DATA', 'LOCAL_CSV_SHA256_VERIFIED', 'ep', 1, 'dummy_hash', '2026-08-20T00:00:00+00:00', '2026-08-20T00:00:00+00:00')
+            """
+        )
+
+    res = sync_parquet_date(repo, "2026-08-20", dry_run=True)
+    assert res.action is ParquetExportAction.SOURCE_INVALID
+    assert res.error is not None
