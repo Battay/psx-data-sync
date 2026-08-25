@@ -12,7 +12,7 @@ PSX Data Sync is a standalone Python application and desktop GUI for downloading
 - **Concurrent Range Synchronization**: Multi-worker asynchronous date-range downloading with configurable worker pools (1 to 16 workers).
 - **Durable SQLite State & History**: Tracks attempt metadata, verification status, file checksums, and execution audit history without duplicating raw market data.
 - **Evidence-Based Range Reconciliation**: Audits historical date coverage, applies non-destructive repair staging, detects file corruption or missing artifacts, and enforces evidence policy rules.
-- **Derived Parquet Export**: Synchronizes date-partitioned Parquet files (`year=YYYY/month=MM/market_YYYY-MM-DD.parquet`) for fast analytical queries without mutating raw CSV artifacts.
+- **Derived Parquet Export**: Builds one deterministic consolidated Parquet file (`data/parquet/market.parquet`) from every verified canonical CSV without mutating raw artifacts.
 - **Modern PySide6 Desktop GUI**: Full multi-page desktop application featuring Dashboard, Incremental Download, Local CSV Import, Range Reconciliation, Parquet Export, and Activity Logs with integrated dark theme styling and calendar date pickers.
 - **macOS Application Packaging**: Standalone macOS `.app` bundle created with PyInstaller, supporting zero-dependency execution and macOS `Application Support` data storage.
 
@@ -74,9 +74,10 @@ python -m psx_data_sync.cli status
 python -m psx_data_sync.cli reconcile --start 2026-08-01 --end 2026-08-31
 ```
 
-#### Export Parquet Partitions
+#### Export Consolidated Parquet
 ```bash
-python -m psx_data_sync.cli export-parquet --start 2026-08-01 --end 2026-08-31
+python -m psx_data_sync.cli export-parquet
+python -m psx_data_sync.cli export-parquet --apply
 ```
 
 ---
@@ -109,7 +110,7 @@ ditto -c -k --sequesterRsrc --keepParent "dist/PSX Data Sync.app" "dist/PSX-Data
 - **Development / CLI Mode**: Writable artifacts default relative to working directory:
   - State DB: `data/state/psx_sync.db`
   - Canonical CSV Data: `data/raw/market_YYYY-MM-DD.csv`
-  - Parquet Export Data: `data/parquet/year=YYYY/month=MM/market_YYYY-MM-DD.parquet`
+  - Parquet Export Data: `data/parquet/market.parquet`
   - Repair Staging: `data/state/repair_staging/`
 
 - **Frozen macOS Application Mode**: When launched as a standalone `.app`, data is safely stored under the user's macOS Application Support directory:
@@ -122,9 +123,9 @@ ditto -c -k --sequesterRsrc --keepParent "dist/PSX Data Sync.app" "dist/PSX-Data
 ## Data Architecture & Safety Principles
 
 1. **Canonical CSV Primacy**: UTF-8 CSV files (`symbol,ldcp,open,high,low,close,change,change_percent,volume`) remain the immutable ground truth for all market observations.
-2. **Derived Parquet Synchronizer**: Parquet partitions are strictly derived downstream from canonical CSV files. If a CSV artifact changes or is updated, the Parquet synchronizer marks the partition as `STALE` and rebuilds it without modifying raw CSV data.
+2. **Derived Parquet Synchronizer**: The consolidated Parquet file is strictly derived from the complete verified canonical CSV set. A source date being added, changed, or removed makes the dataset `STALE`; rebuilding never modifies raw CSV data. Older per-date partition folders are reported as legacy output and are not deleted automatically.
 3. **No Fabrication Guarantee**: Missing or corrupt data is never filled with dummy or fabricated values.
-4. **No-Clobber Atomic File Safety**: File writes use temporary files flushed with `fsync` followed by atomic create-without-replacement operations. Existing valid files are never overwritten automatically.
+4. **Atomic File Safety**: Canonical CSV writes use no-clobber atomic creation. The derived consolidated Parquet file is written and validated as a sibling temporary file, then replaced atomically only during explicit apply.
 5. **Dry-Run Default**: All destructive or state-altering reconciliation and export actions default to safe dry-run preview modes requiring explicit user confirmation before applying.
 
 ---

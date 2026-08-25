@@ -568,7 +568,7 @@ class ReconciliationRunRecord:
 
 
 class ParquetExportStatus(StrEnum):
-    """Persistent state of one derived Parquet market-date partition."""
+    """Synchronization state of a derived Parquet artifact."""
 
     CURRENT = "CURRENT"
     MISSING = "MISSING"
@@ -579,7 +579,7 @@ class ParquetExportStatus(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class ParquetExportRecord:
-    """Persistent provenance for one derived Parquet partition."""
+    """Legacy persistent provenance for one per-date Parquet partition."""
 
     market_date: str
     status: ParquetExportStatus

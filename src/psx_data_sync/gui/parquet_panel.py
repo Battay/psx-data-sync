@@ -1,34 +1,27 @@
-"""Parquet export panel widget for PSX Data Sync desktop GUI."""
+"""Consolidated Parquet export panel for the desktop GUI."""
 
 from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from datetime import date, timedelta
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
-    QHeaderView,
     QLabel,
     QLineEdit,
     QMessageBox,
     QProgressBar,
     QPushButton,
-    QTableWidget,
-    QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
-from ..downloader import validate_requested_date
-from ..parquet_sync import RangeParquetSyncResult, sync_parquet_range
+from ..parquet_sync import ConsolidatedParquetSyncResult, sync_consolidated_parquet
 from .dashboard import MetricCard
-from .widgets import PSXDateEdit
 from .workers import BaseWorker
 
 if TYPE_CHECKING:
@@ -38,7 +31,7 @@ logger = logging.getLogger(__name__)
 
 
 class ParquetExportWidget(QWidget):
-    """GUI Panel for running Parquet export and synchronization."""
+    """Plan and build one Parquet file from the complete verified CSV set."""
 
     def __init__(
         self,
@@ -49,9 +42,8 @@ class ParquetExportWidget(QWidget):
         super().__init__(parent)
         self.repository = repository
         self.on_export_success = on_export_success
-        self.last_result: RangeParquetSyncResult | None = None
+        self.last_result: ConsolidatedParquetSyncResult | None = None
         self.active_worker: BaseWorker | None = None
-
         self._init_ui()
 
     def _init_ui(self) -> None:
@@ -59,145 +51,83 @@ class ParquetExportWidget(QWidget):
         main_layout.setContentsMargins(16, 16, 16, 16)
         main_layout.setSpacing(12)
 
-        # Controls Group Box
-        controls_group = QGroupBox("Parquet Export Configuration")
+        controls_group = QGroupBox("Consolidated Parquet Export")
         controls_layout = QHBoxLayout(controls_group)
-        controls_layout.setSpacing(12)
-
-        today = date.today()
-        default_start = (today - timedelta(days=30)).isoformat()
-        default_end = today.isoformat()
-
-        lbl_start = QLabel("Start Date:")
-        lbl_start.setStyleSheet("font-weight: bold;")
-        controls_layout.addWidget(lbl_start)
-
-        self.txt_start_date = PSXDateEdit(default_start)
-        controls_layout.addWidget(self.txt_start_date)
-
-        lbl_end = QLabel("End Date:")
-        lbl_end.setStyleSheet("font-weight: bold;")
-        controls_layout.addWidget(lbl_end)
-
-        self.txt_end_date = PSXDateEdit(default_end)
-        controls_layout.addWidget(self.txt_end_date)
-
-        self.chk_rebuild = QCheckBox("Rebuild (Force Overwrite)")
-        self.chk_rebuild.setToolTip("Allowed only when running in Apply mode.")
+        description = QLabel(
+            "Build data/parquet/market.parquet from every verified canonical CSV. "
+            "No network access is used."
+        )
+        description.setWordWrap(True)
+        controls_layout.addWidget(description, 1)
+        self.chk_rebuild = QCheckBox("Rebuild current file")
+        self.chk_rebuild.setToolTip("Force a full rebuild; available only in Apply mode.")
         controls_layout.addWidget(self.chk_rebuild)
-
-        controls_layout.addStretch()
-
         self.btn_dry_run = QPushButton("Dry Run (Plan Only)")
         self.btn_dry_run.clicked.connect(lambda: self.run_export(dry_run=True))
         controls_layout.addWidget(self.btn_dry_run)
-
-        self.btn_apply = QPushButton("Apply Parquet Export")
+        self.btn_apply = QPushButton("Apply Consolidated Export")
         self.btn_apply.setProperty("accent", True)
         self.btn_apply.clicked.connect(lambda: self.run_export(dry_run=False))
         controls_layout.addWidget(self.btn_apply)
-
         main_layout.addWidget(controls_group)
 
-        # Status & Progress Display Bar
         status_layout = QHBoxLayout()
-        self.lbl_status = QLabel("Ready. Specify a date range for Parquet export.")
+        self.lbl_status = QLabel("Ready. Dry-run inspects the complete verified local dataset.")
         self.lbl_status.setStyleSheet("font-size: 13px; color: #94a3b8;")
-        status_layout.addWidget(self.lbl_status)
-
-        status_layout.addStretch()
-
+        status_layout.addWidget(self.lbl_status, 1)
         self.error_label = QLabel("")
         self.error_label.setStyleSheet("color: #ef4444; font-weight: bold;")
         self.error_label.setVisible(False)
         status_layout.addWidget(self.error_label)
-
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 0)
         self.progress_bar.setFixedWidth(150)
         self.progress_bar.setVisible(False)
         status_layout.addWidget(self.progress_bar)
-
         main_layout.addLayout(status_layout)
 
-        # Summary Metrics Box
-        summary_group = QGroupBox("Parquet Export Summary")
+        summary_group = QGroupBox("Consolidated Dataset Summary")
         summary_grid = QGridLayout(summary_group)
         summary_grid.setSpacing(10)
-
-        self.card_requested = MetricCard("Requested Dates", "—")
-        self.card_eligible = MetricCard("Eligible", "—")
-        self.card_sync_pct = MetricCard("Synchronized %", "—")
-        self.card_current = MetricCard("Current / No-Op", "—")
-        self.card_create = MetricCard("Create", "—")
-        self.card_stale = MetricCard("Stale", "—")
-        self.card_corrupt = MetricCard("Corrupt", "—")
-        self.card_reindex = MetricCard("Reindex", "—")
-        self.card_unresolved = MetricCard("Excluded Unresolved", "—")
-        self.card_issues = MetricCard("Excluded Issues", "—")
-        self.card_source_invalid = MetricCard("Source Invalid", "—")
-        self.card_failed = MetricCard("Failed", "—")
-        self.card_written = MetricCard("Written / Rebuilt", "—")
+        self.card_source_dates = MetricCard("Verified Source Dates", "—")
+        self.card_source_rows = MetricCard("Total Source Rows", "—")
+        self.card_status = MetricCard("Dataset Status", "—")
+        self.card_rows_written = MetricCard("Rows Written", "—")
+        self.card_file_size = MetricCard("File Size", "—")
+        self.card_last_build = MetricCard("Last Build", "—")
+        self.card_legacy = MetricCard("Legacy Partitions", "—")
+        self.card_action = MetricCard("Action", "—")
         self.card_duration = MetricCard("Duration", "—")
-
-        summary_grid.addWidget(self.card_requested, 0, 0)
-        summary_grid.addWidget(self.card_eligible, 0, 1)
-        summary_grid.addWidget(self.card_sync_pct, 0, 2)
-        summary_grid.addWidget(self.card_current, 0, 3)
-        summary_grid.addWidget(self.card_create, 0, 4)
-
-        summary_grid.addWidget(self.card_stale, 1, 0)
-        summary_grid.addWidget(self.card_corrupt, 1, 1)
-        summary_grid.addWidget(self.card_reindex, 1, 2)
-        summary_grid.addWidget(self.card_unresolved, 1, 3)
-        summary_grid.addWidget(self.card_issues, 1, 4)
-
-        summary_grid.addWidget(self.card_source_invalid, 2, 0)
-        summary_grid.addWidget(self.card_failed, 2, 1)
-        summary_grid.addWidget(self.card_written, 2, 2)
-        summary_grid.addWidget(self.card_duration, 2, 3)
-
+        for index, card in enumerate(
+            (
+                self.card_source_dates,
+                self.card_source_rows,
+                self.card_status,
+                self.card_rows_written,
+                self.card_file_size,
+                self.card_last_build,
+                self.card_legacy,
+                self.card_action,
+                self.card_duration,
+            )
+        ):
+            summary_grid.addWidget(card, index // 3, index % 3)
         main_layout.addWidget(summary_group)
 
-        # Per-Date Result Table
-        table_group = QGroupBox("Per-Date Partition Sync Details")
-        table_layout = QVBoxLayout(table_group)
-        table_layout.setContentsMargins(8, 8, 8, 8)
-
-        self.table = QTableWidget()
-        self.table.setColumnCount(7)
-        self.table.setAlternatingRowColors(True)
-        v_header = self.table.verticalHeader()
-        if v_header is not None:
-            v_header.setDefaultSectionSize(30)
-            v_header.setVisible(False)
-
-        self.table.setHorizontalHeaderLabels([
-            "Market Date",
-            "Source Status",
-            "Planned Action",
-            "Parquet Before",
-            "Parquet After",
-            "Row Count",
-            "Details / Warnings / Error",
-        ])
-        header = self.table.horizontalHeader()
-        if header is not None:
-            header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-            header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-            header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-            header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
-            header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
-            header.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
-            header.setSectionResizeMode(6, QHeaderView.ResizeMode.Stretch)
-        self.table.setSortingEnabled(True)
-        table_layout.addWidget(self.table)
-
-        main_layout.addWidget(table_group)
+        details_group = QGroupBox("Dataset Identity and Output")
+        details_grid = QGridLayout(details_group)
+        details_grid.addWidget(QLabel("Output path:"), 0, 0)
+        self.txt_output_path = QLineEdit()
+        self.txt_output_path.setReadOnly(True)
+        details_grid.addWidget(self.txt_output_path, 0, 1)
+        details_grid.addWidget(QLabel("Source identity:"), 1, 0)
+        self.txt_source_identity = QLineEdit()
+        self.txt_source_identity.setReadOnly(True)
+        details_grid.addWidget(self.txt_source_identity, 1, 1)
+        main_layout.addWidget(details_group)
+        main_layout.addStretch()
 
     def _set_controls_enabled(self, enabled: bool) -> None:
-        self.txt_start_date.setEnabled(enabled)
-        self.txt_end_date.setEnabled(enabled)
         self.chk_rebuild.setEnabled(enabled)
         self.btn_dry_run.setEnabled(enabled)
         self.btn_apply.setEnabled(enabled)
@@ -207,70 +137,40 @@ class ParquetExportWidget(QWidget):
         self.error_label.setVisible(True)
 
     def run_export(self, dry_run: bool = True) -> None:
-        """Execute Parquet export in dry-run or apply mode with safety guards."""
+        """Run full-source inspection or confirmed consolidated build."""
 
         if self.active_worker is not None and self.active_worker.isRunning():
             return
-
         rebuild = self.chk_rebuild.isChecked()
         if rebuild and dry_run:
             self._show_error("Rebuild can only be used with Apply mode.")
             return
-
-        start_str = self.txt_start_date.date_str
-        end_str = self.txt_end_date.date_str
-
-        try:
-            d_start = validate_requested_date(start_str, today=date.max)
-            d_end = validate_requested_date(end_str, today=date.max)
-        except Exception as exc:
-            self._show_error(f"Invalid date format: {exc}")
-            return
-
-        if d_start > d_end:
-            self._show_error("Start date cannot be after end date.")
-            return
-
-        cal_days = (d_end - d_start).days + 1
-        if cal_days > 90:
-            confirm = QMessageBox.question(
-                self,
-                "Large Range Parquet Export Warning",
-                f"The requested date range spans {cal_days} calendar days (> 90 days).\n\n"
-                "Do you want to proceed with Parquet export for this range?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
-            )
-            if confirm != QMessageBox.StandardButton.Yes:
-                self.lbl_status.setText("Parquet export cancelled by user.")
-                return
-
         if not dry_run:
-            confirm_apply = QMessageBox.question(
+            answer = QMessageBox.question(
                 self,
-                "Confirm Parquet Export Apply",
-                f"Are you sure you want to apply Parquet export for:\n{start_str} to {end_str}?\n\n"
-                "This will write or rebuild derived Parquet partitions on disk.",
+                "Confirm Consolidated Parquet Export",
+                "Build one consolidated Parquet file from every verified canonical CSV?\n\n"
+                "The existing consolidated file will be replaced atomically. Legacy "
+                "partition folders will not be deleted.",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No,
             )
-            if confirm_apply != QMessageBox.StandardButton.Yes:
+            if answer != QMessageBox.StandardButton.Yes:
                 self.lbl_status.setText("Parquet export cancelled by user.")
                 return
 
         self.error_label.setVisible(False)
-        mode_label = "Dry Run" if dry_run else "Apply"
         self.lbl_status.setText(
-            f"Running {mode_label} Parquet export on {cal_days} market dates..."
+            "Inspecting complete verified source set..."
+            if dry_run
+            else "Building consolidated Parquet file..."
         )
         self.progress_bar.setVisible(True)
         self._set_controls_enabled(False)
-
         worker = BaseWorker(
-            sync_parquet_range,
+            sync_consolidated_parquet,
             self.repository,
-            start_str,
-            end_str,
+            output_root=self.repository.raw_output_dir.parent / "parquet",
             dry_run=dry_run,
             rebuild=rebuild,
         )
@@ -278,114 +178,40 @@ class ParquetExportWidget(QWidget):
         worker.signals.error.connect(self._on_export_error)
         worker.signals.finished.connect(self._on_worker_finished)
         worker.finished.connect(worker.deleteLater)
-
         self.active_worker = worker
         worker.start()
 
-    def _on_export_completed(self, result: RangeParquetSyncResult) -> None:
+    def _on_export_completed(self, result: ConsolidatedParquetSyncResult) -> None:
         try:
             self.last_result = result
-
-            excluded_issues = (
-                result.excluded_failure_count + result.excluded_file_issue_count
+            self.card_source_dates.set_value(f"{result.source_dates:,}")
+            self.card_source_rows.set_value(f"{result.source_rows:,}")
+            self.card_status.set_value(result.status.value)
+            self.card_rows_written.set_value(f"{result.rows_written:,}")
+            self.card_file_size.set_value(
+                f"{result.file_size:,} bytes" if result.file_size is not None else "—"
             )
-
-            # Update Metric Cards
-            self.card_requested.set_value(f"{result.requested_count:,}")
-            self.card_eligible.set_value(f"{result.eligible_count:,}")
-            self.card_sync_pct.set_value(f"{result.synchronization_percentage:.1f}%")
-            self.card_current.set_value(f"{result.current_count:,}")
-            self.card_create.set_value(f"{result.create_count:,}")
-            self.card_stale.set_value(f"{result.stale_count:,}")
-            self.card_corrupt.set_value(f"{result.corrupt_count:,}")
-            self.card_reindex.set_value(f"{result.reindexed_count:,}")
-            self.card_unresolved.set_value(f"{result.excluded_unresolved_count:,}")
-            self.card_issues.set_value(f"{excluded_issues:,}")
-            self.card_source_invalid.set_value(f"{result.source_invalid_count:,}")
-            self.card_failed.set_value(f"{result.failed_count:,}")
-            self.card_written.set_value(f"{result.written_or_rebuilt_count:,}")
+            self.card_last_build.set_value(result.last_build or "—")
+            self.card_legacy.set_value(f"{result.legacy_partition_count:,}")
+            self.card_action.set_value(result.action.value)
             self.card_duration.set_value(f"{result.duration_ms / 1000.0:.2f} s")
-
-            # Populate Per-Date Decision Table
-            self.table.setSortingEnabled(False)
-            self.table.setRowCount(len(result.results))
-
-            for row_idx, r in enumerate(result.results):
-                source_str = (
-                    r.source_status.value
-                    if r.source_status and hasattr(r.source_status, "value")
-                    else str(r.source_status or "—")
-                )
-                action_str = (
-                    r.action.value if hasattr(r.action, "value") else str(r.action)
-                )
-
-                before_str = (
-                    r.export_status_before.value
-                    if r.export_status_before and hasattr(r.export_status_before, "value")
-                    else str(r.export_status_before or "—")
-                )
-
-                target_status = (
-                    r.export_status_planned if r.dry_run else r.export_status_after
-                )
-                after_str = (
-                    target_status.value
-                    if target_status and hasattr(target_status, "value")
-                    else str(target_status or "—")
-                )
-
-                row_cnt_str = (
-                    f"{r.parquet_row_count:,}"
-                    if r.parquet_row_count is not None
-                    else (f"{r.source_row_count:,}" if r.source_row_count is not None else "—")
-                )
-
-                item_date = QTableWidgetItem(r.market_date)
-                item_src = QTableWidgetItem(source_str)
-                item_act = QTableWidgetItem(action_str)
-                item_bef = QTableWidgetItem(before_str)
-                item_aft = QTableWidgetItem(after_str)
-                item_rows = QTableWidgetItem(row_cnt_str)
-
-                details_parts: list[str] = []
-                if r.error:
-                    details_parts.append(f"Error: {r.error}")
-                if r.warnings:
-                    details_parts.append(f"Warnings: {'; '.join(r.warnings)}")
-                if not details_parts:
-                    details_parts.append("OK")
-                item_details = QTableWidgetItem(" | ".join(details_parts))
-
-                item_rows.setTextAlignment(
-                    Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
-                )
-
-                self.table.setItem(row_idx, 0, item_date)
-                self.table.setItem(row_idx, 1, item_src)
-                self.table.setItem(row_idx, 2, item_act)
-                self.table.setItem(row_idx, 3, item_bef)
-                self.table.setItem(row_idx, 4, item_aft)
-                self.table.setItem(row_idx, 5, item_rows)
-                self.table.setItem(row_idx, 6, item_details)
-
-            self.table.setSortingEnabled(True)
-
-            mode_str = "Dry Run" if result.dry_run else "Apply"
+            self.txt_output_path.setText(str(result.output_path))
+            self.txt_source_identity.setText(result.source_identity or "")
+            mode = "Dry Run" if result.dry_run else "Apply"
             self.lbl_status.setText(
-                f"Parquet export ({mode_str}) finished in {result.duration_ms / 1000.0:.2f} s. "
-                f"Synchronized: {result.synchronization_percentage:.1f}%, Eligible: {result.eligible_count}, "
-                f"Written/Rebuilt: {result.written_or_rebuilt_count}."
+                f"Consolidated export {mode} finished: {result.status.value}; "
+                f"{result.source_dates:,} source dates, {result.source_rows:,} rows."
             )
-
-            if not result.dry_run and self.on_export_success:
+            if result.errors:
+                self._show_error("; ".join(result.errors))
+            if not result.dry_run and result.synchronized and self.on_export_success:
                 try:
                     self.on_export_success()
-                except Exception as exc:
+                except Exception:
                     logger.exception("failed to trigger on_export_success callback")
         except Exception as exc:
-            logger.exception("error rendering parquet export results")
-            self._show_error(f"Error rendering parquet export results: {exc}")
+            logger.exception("error rendering consolidated Parquet results")
+            self._show_error(f"Error rendering Parquet results: {exc}")
             self.lbl_status.setText("Parquet export results rendering failed.")
 
     def _on_export_error(self, error_msg: str) -> None:

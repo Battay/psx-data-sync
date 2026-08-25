@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-from datetime import date, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -11,11 +10,10 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 from psx_data_sync.gui.app import create_app
 from psx_data_sync.gui.parquet_panel import ParquetExportWidget
 from psx_data_sync.parquet_sync import (
-    DateParquetSyncResult,
+    ConsolidatedParquetSyncResult,
     ParquetExportAction,
-    RangeParquetSyncResult,
 )
-from psx_data_sync.state import ParquetExportStatus, PersistentSyncStatus
+from psx_data_sync.state import ParquetExportStatus
 from psx_data_sync.state_db import StateRepository
 
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
@@ -29,215 +27,118 @@ def qapp() -> QApplication:
     return app
 
 
-def _dummy_parquet_result(
-    start_date: str = "2026-08-01",
-    end_date: str = "2026-08-02",
-    dry_run: bool = True,
-) -> RangeParquetSyncResult:
-    res1 = DateParquetSyncResult(
-        market_date="2026-08-01",
-        source_status=PersistentSyncStatus.VERIFIED_TRADING_DATA,
+def _dummy_result(tmp_path: Path, *, dry_run: bool) -> ConsolidatedParquetSyncResult:
+    return ConsolidatedParquetSyncResult(
+        source_dates=4,
+        source_rows=2371,
+        status=ParquetExportStatus.MISSING if dry_run else ParquetExportStatus.CURRENT,
+        planned_status=ParquetExportStatus.CURRENT,
         action=ParquetExportAction.CREATE,
-        export_status_before=ParquetExportStatus.MISSING,
-        export_status_planned=ParquetExportStatus.CURRENT,
-        export_status_after=ParquetExportStatus.CURRENT if not dry_run else ParquetExportStatus.MISSING,
-        eligible=True,
-        source_csv_path=Path("data/raw/market_2026-08-01.csv"),
-        source_checksum="abc1",
-        source_row_count=150,
-        parquet_path=Path("data/parquet/market_date=2026-08-01/data.parquet"),
-        parquet_checksum="xyz1",
-        parquet_row_count=150,
+        rows_written=0 if dry_run else 2371,
+        output_path=tmp_path / "data" / "parquet" / "market.parquet",
+        source_identity="a" * 64,
+        legacy_partition_count=3,
+        file_size=None if dry_run else 45678,
+        last_build=None if dry_run else "2026-08-25T10:00:00+00:00",
         dry_run=dry_run,
-        rebuilt_or_written=True,
-    )
-    res2 = DateParquetSyncResult(
-        market_date="2026-08-02",
-        source_status=PersistentSyncStatus.CONFIRMED_NON_TRADING,
-        action=ParquetExportAction.EXCLUDE_NON_TRADING,
-        export_status_before=None,
-        export_status_planned=None,
-        export_status_after=None,
-        eligible=False,
-        source_csv_path=None,
-        source_checksum=None,
-        source_row_count=None,
-        parquet_path=None,
-        parquet_checksum=None,
-        parquet_row_count=None,
-        dry_run=dry_run,
-        rebuilt_or_written=False,
-    )
-    return RangeParquetSyncResult(
-        start_date=start_date,
-        end_date=end_date,
-        requested_count=2,
-        eligible_count=1,
-        current_count=0,
-        create_count=1,
-        stale_count=0,
-        corrupt_count=0,
-        reindexed_count=0,
-        excluded_non_trading_count=1,
-        excluded_unresolved_count=0,
-        excluded_failure_count=0,
-        excluded_file_issue_count=0,
-        source_invalid_count=0,
-        failed_count=0,
-        written_or_rebuilt_count=1,
-        synchronized=True,
-        synchronization_percentage=100.0,
-        dry_run=dry_run,
+        rebuild=False,
         duration_ms=450.0,
-        results=(res1, res2),
     )
 
 
-def test_parquet_widget_construction_no_network(
+def test_widget_is_consolidated_and_has_no_range_or_partition_table(
     qapp: QApplication, tmp_path: Path
 ) -> None:
     repo = StateRepository(tmp_path / "state.db", project_root=tmp_path)
     repo.initialize()
-
-    with patch("psx_data_sync.gui.parquet_panel.sync_parquet_range") as mock_backend:
+    with patch("psx_data_sync.gui.parquet_panel.sync_consolidated_parquet") as backend:
         widget = ParquetExportWidget(repo)
-        assert widget.txt_start_date is not None
-        assert widget.txt_end_date is not None
-        assert widget.txt_start_date.calendarPopup() is True
-        assert widget.txt_start_date.displayFormat() == "yyyy-MM-dd"
-        assert widget.chk_rebuild.isChecked() is False
-        assert widget.table.columnCount() == 7
-        mock_backend.assert_not_called()
+        assert not hasattr(widget, "txt_start_date")
+        assert not hasattr(widget, "txt_end_date")
+        assert not hasattr(widget, "table")
+        assert widget.card_source_dates is not None
+        assert widget.card_source_rows is not None
+        assert widget.card_status is not None
+        assert widget.txt_output_path.isReadOnly()
+        backend.assert_not_called()
 
 
-def test_rebuild_rejected_in_dry_run_mode(
-    qapp: QApplication, tmp_path: Path
-) -> None:
+def test_rebuild_rejected_during_dry_run(qapp: QApplication, tmp_path: Path) -> None:
     repo = StateRepository(tmp_path / "state.db", project_root=tmp_path)
     repo.initialize()
-
     widget = ParquetExportWidget(repo)
     widget.chk_rebuild.setChecked(True)
-
-    with patch("psx_data_sync.gui.parquet_panel.sync_parquet_range") as mock_backend:
+    with patch("psx_data_sync.gui.parquet_panel.sync_consolidated_parquet") as backend:
         widget.run_export(dry_run=True)
         assert "Rebuild can only be used with Apply mode" in widget.error_label.text()
-        mock_backend.assert_not_called()
+        backend.assert_not_called()
 
 
-def test_date_validation_errors(qapp: QApplication, tmp_path: Path) -> None:
+def test_dry_run_service_compatibility(qapp: QApplication, tmp_path: Path) -> None:
     repo = StateRepository(tmp_path / "state.db", project_root=tmp_path)
     repo.initialize()
-
     widget = ParquetExportWidget(repo)
-
-    # Start date after end date
-    widget.txt_start_date.set_date_val("2026-08-10")
-    widget.txt_end_date.set_date_val("2026-08-05")
-    widget.run_export(dry_run=True)
-    assert "Start date cannot be after end date" in widget.error_label.text()
-
-
-def test_large_range_confirmation_cancellation_aborts_export(
-    qapp: QApplication, tmp_path: Path
-) -> None:
-    repo = StateRepository(tmp_path / "state.db", project_root=tmp_path)
-    repo.initialize()
-
-    widget = ParquetExportWidget(repo)
-    # Range > 90 days (100 days)
-    widget.txt_start_date.set_date_val("2026-01-01")
-    widget.txt_end_date.set_date_val("2026-04-10")
-
-    with patch("psx_data_sync.gui.parquet_panel.sync_parquet_range") as mock_backend:
-        with patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.No):
-            widget.run_export(dry_run=True)
-
-        assert widget.lbl_status.text() == "Parquet export cancelled by user."
-        mock_backend.assert_not_called()
-
-
-def test_apply_mode_confirmation_cancellation_aborts_export(
-    qapp: QApplication, tmp_path: Path
-) -> None:
-    repo = StateRepository(tmp_path / "state.db", project_root=tmp_path)
-    repo.initialize()
-
-    widget = ParquetExportWidget(repo)
-    widget.txt_start_date.set_date_val("2026-08-01")
-    widget.txt_end_date.set_date_val("2026-08-02")
-
-    with patch("psx_data_sync.gui.parquet_panel.sync_parquet_range") as mock_backend:
-        with patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.No):
-            widget.run_export(dry_run=False)
-
-        assert widget.lbl_status.text() == "Parquet export cancelled by user."
-        mock_backend.assert_not_called()
-
-
-def test_dry_run_parquet_export_execution(qapp: QApplication, tmp_path: Path) -> None:
-    repo = StateRepository(tmp_path / "state.db", project_root=tmp_path)
-    repo.initialize()
-
-    widget = ParquetExportWidget(repo)
-    widget.txt_start_date.set_date_val("2026-08-01")
-    widget.txt_end_date.set_date_val("2026-08-02")
-
-    dummy_res = _dummy_parquet_result(dry_run=True)
-
-    with patch("psx_data_sync.gui.parquet_panel.sync_parquet_range", return_value=dummy_res) as mock_backend:
+    dummy = _dummy_result(tmp_path, dry_run=True)
+    with patch(
+        "psx_data_sync.gui.parquet_panel.sync_consolidated_parquet",
+        return_value=dummy,
+    ) as backend:
         widget.run_export(dry_run=True)
-
         if widget.active_worker:
             widget.active_worker.wait(5000)
             qapp.processEvents()
-
-        mock_backend.assert_called_once_with(
+        backend.assert_called_once_with(
             repo,
-            "2026-08-01",
-            "2026-08-02",
+            output_root=repo.raw_output_dir.parent / "parquet",
             dry_run=True,
             rebuild=False,
         )
+    assert widget.last_result == dummy
+    assert widget.card_source_dates.value_label.text() == "4"
+    assert widget.card_source_rows.value_label.text() == "2,371"
+    assert widget.card_status.value_label.text() == "MISSING"
+    assert widget.card_legacy.value_label.text() == "3"
+    assert widget.txt_output_path.text().endswith("data/parquet/market.parquet")
 
-    assert widget.last_result is not None
-    assert widget.card_requested.value_label.text() == "2"
-    assert widget.card_eligible.value_label.text() == "1"
-    assert widget.card_sync_pct.value_label.text() == "100.0%"
-    assert widget.table.rowCount() == 2
 
-
-def test_apply_parquet_export_execution_and_callback(
+def test_apply_confirmation_and_success_callback(
     qapp: QApplication, tmp_path: Path
 ) -> None:
     repo = StateRepository(tmp_path / "state.db", project_root=tmp_path)
     repo.initialize()
-
-    callback_mock = MagicMock()
-    widget = ParquetExportWidget(repo, on_export_success=callback_mock)
-    widget.txt_start_date.set_date_val("2026-08-01")
-    widget.txt_end_date.set_date_val("2026-08-02")
-    widget.chk_rebuild.setChecked(True)
-
-    dummy_res = _dummy_parquet_result(dry_run=False)
-
-    with patch("psx_data_sync.gui.parquet_panel.sync_parquet_range", return_value=dummy_res) as mock_backend:
-        with patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes):
-            widget.run_export(dry_run=False)
-
+    callback = MagicMock()
+    widget = ParquetExportWidget(repo, on_export_success=callback)
+    dummy = _dummy_result(tmp_path, dry_run=False)
+    with patch(
+        "psx_data_sync.gui.parquet_panel.sync_consolidated_parquet",
+        return_value=dummy,
+    ) as backend, patch.object(
+        QMessageBox,
+        "question",
+        return_value=QMessageBox.StandardButton.Yes,
+    ):
+        widget.run_export(dry_run=False)
         if widget.active_worker:
             widget.active_worker.wait(5000)
             qapp.processEvents()
+        backend.assert_called_once()
+    callback.assert_called_once()
+    assert widget.card_status.value_label.text() == "CURRENT"
+    assert widget.card_rows_written.value_label.text() == "2,371"
+    assert widget.btn_apply.isEnabled()
 
-        mock_backend.assert_called_once_with(
-            repo,
-            "2026-08-01",
-            "2026-08-02",
-            dry_run=False,
-            rebuild=True,
-        )
 
-    assert widget.btn_apply.isEnabled() is True
-    assert widget.progress_bar.isVisible() is False
-    assert widget.active_worker is None
-    callback_mock.assert_called_once()
+def test_apply_cancellation_does_not_start_service(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    repo = StateRepository(tmp_path / "state.db", project_root=tmp_path)
+    repo.initialize()
+    widget = ParquetExportWidget(repo)
+    with patch("psx_data_sync.gui.parquet_panel.sync_consolidated_parquet") as backend, patch.object(
+        QMessageBox,
+        "question",
+        return_value=QMessageBox.StandardButton.No,
+    ):
+        widget.run_export(dry_run=False)
+    backend.assert_not_called()
+    assert widget.lbl_status.text() == "Parquet export cancelled by user."

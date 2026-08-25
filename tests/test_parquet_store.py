@@ -10,9 +10,11 @@ from psx_data_sync.exporter import canonical_csv_bytes
 from psx_data_sync.parquet_store import (
     PARQUET_COLUMNS,
     PARQUET_SCHEMA_VERSION,
+    ParquetSource,
+    compute_source_identity,
+    consolidated_parquet_path,
     inspect_parquet_file,
-    parquet_partition_path,
-    write_parquet_partition,
+    write_consolidated_parquet,
 )
 from psx_data_sync.state import ValidEquityRow
 
@@ -32,198 +34,137 @@ def _row(symbol: str, row_index: int) -> ValidEquityRow:
     )
 
 
-def _write_source(path, rows):
+def _source(tmp_path, day: date, symbols: tuple[str, ...]) -> ParquetSource:
+    rows = tuple(_row(symbol, index) for index, symbol in enumerate(symbols, 1))
+    path = tmp_path / "raw" / f"market_{day.isoformat()}.csv"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(canonical_csv_bytes(rows))
+    content = canonical_csv_bytes(rows)
+    path.write_bytes(content)
+    import hashlib
+
+    return ParquetSource(day, path, hashlib.sha256(content).hexdigest(), len(rows))
 
 
-def test_partition_path_is_date_partitioned(tmp_path):
-    target = parquet_partition_path(
-        tmp_path,
-        date(2026, 8, 7),
-    )
-
-    assert target == (
-        tmp_path
-        / "market"
-        / "market_date=2026-08-07"
-        / "part-0.parquet"
-    )
+def test_consolidated_path_is_one_file(tmp_path):
+    assert consolidated_parquet_path(tmp_path) == tmp_path / "market.parquet"
 
 
-def test_verified_canonical_csv_exports_to_valid_parquet(tmp_path):
-    source = tmp_path / "market_2026-08-07.csv"
-    output = tmp_path / "parquet"
+def test_multiple_dates_build_one_zstd_file_in_deterministic_order(tmp_path):
+    later = _source(tmp_path, date(2026, 8, 8), ("ZZZ", "AAA"))
+    earlier = _source(tmp_path, date(2026, 8, 7), ("MEBL", "AAA"))
 
-    _write_source(
-        source,
-        (
-            _row("ZZZ", 1),
-            _row("AAA", 2),
-        ),
-    )
+    result = write_consolidated_parquet((later, earlier), tmp_path / "parquet")
 
-    result = write_parquet_partition(
-        date(2026, 8, 7),
-        source,
-        output,
-    )
-
-    assert result.row_count == 2
-    assert result.path.exists()
-
-    inspection = inspect_parquet_file(
-        result.path,
-        expected_market_date=date(2026, 8, 7),
-        expected_source_checksum=result.source_csv_checksum,
-        expected_source_row_count=2,
-    )
-
-    assert inspection.valid is True
-    assert inspection.schema_version == PARQUET_SCHEMA_VERSION
-    assert inspection.row_count == 2
-
-
-def test_parquet_schema_and_row_order_are_deterministic(tmp_path):
-    source = tmp_path / "market_2026-08-07.csv"
-    output = tmp_path / "parquet"
-
-    _write_source(
-        source,
-        (
-            _row("ZZZ", 1),
-            _row("AAA", 2),
-            _row("MEBL", 3),
-        ),
-    )
-
-    result = write_parquet_partition(
-        date(2026, 8, 7),
-        source,
-        output,
-    )
-
+    assert result.path == tmp_path / "parquet" / "market.parquet"
+    assert list((tmp_path / "parquet").rglob("*.parquet")) == [result.path]
     table = pq.read_table(result.path)
-
     assert tuple(table.column_names) == PARQUET_COLUMNS
-    assert table.column("symbol").to_pylist() == [
-        "AAA",
-        "MEBL",
-        "ZZZ",
+    assert list(zip(table["market_date"].to_pylist(), table["symbol"].to_pylist())) == [
+        (date(2026, 8, 7), "AAA"),
+        (date(2026, 8, 7), "MEBL"),
+        (date(2026, 8, 8), "AAA"),
+        (date(2026, 8, 8), "ZZZ"),
     ]
+    metadata = pq.ParquetFile(result.path).metadata
+    assert metadata.row_group(0).column(0).compression == "ZSTD"
+    inspection = inspect_parquet_file(result.path)
+    assert inspection.valid
+    assert inspection.schema_version == PARQUET_SCHEMA_VERSION
+    assert inspection.source_date_count == 2
+    assert inspection.source_row_count == 4
 
-    assert table.column("market_date").to_pylist() == [
-        date(2026, 8, 7),
-        date(2026, 8, 7),
-        date(2026, 8, 7),
-    ]
 
+def test_source_identity_is_order_independent_and_content_sensitive(tmp_path):
+    first = _source(tmp_path, date(2026, 8, 7), ("AAA",))
+    second = _source(tmp_path, date(2026, 8, 8), ("BBB",))
+    assert compute_source_identity((first, second)) == compute_source_identity((second, first))
 
-def test_source_csv_is_never_modified(tmp_path):
-    source = tmp_path / "market_2026-08-07.csv"
-    output = tmp_path / "parquet"
-
-    _write_source(source, (_row("AAA", 1),))
-    before = source.read_bytes()
-
-    write_parquet_partition(
-        date(2026, 8, 7),
-        source,
-        output,
+    changed = ParquetSource(
+        second.market_date, second.path, "f" * 64, second.row_count
     )
+    assert compute_source_identity((first, second)) != compute_source_identity((first, changed))
+    assert compute_source_identity((first, second)) != compute_source_identity((first,))
 
-    assert source.read_bytes() == before
+
+def test_duplicate_market_date_symbol_is_rejected(tmp_path):
+    source = _source(tmp_path, date(2026, 8, 7), ("AAA", "AAA"))
+    with pytest.raises(ValueError, match="duplicate symbol"):
+        write_consolidated_parquet((source,), tmp_path / "parquet")
+    assert not consolidated_parquet_path(tmp_path / "parquet").exists()
 
 
-def test_invalid_source_csv_is_rejected(tmp_path):
-    source = tmp_path / "market_2026-08-07.csv"
-    output = tmp_path / "parquet"
-
-    source.write_text(
-        "symbol,ldcp,open,high,low,close,change,change_percent,volume\n"
-        "BAD,null,1,2,1,2,1,1,100\n",
-        encoding="utf-8",
-    )
-
-    with pytest.raises(ValueError):
-        write_parquet_partition(
-            date(2026, 8, 7),
-            source,
-            output,
-        )
-
-    assert not parquet_partition_path(
-        output,
-        date(2026, 8, 7),
-    ).exists()
+def test_source_csv_is_unchanged(tmp_path):
+    source = _source(tmp_path, date(2026, 8, 7), ("AAA", "BBB"))
+    before = source.path.read_bytes()
+    write_consolidated_parquet((source,), tmp_path / "parquet")
+    assert source.path.read_bytes() == before
 
 
 def test_corrupt_parquet_is_detected(tmp_path):
-    path = parquet_partition_path(
-        tmp_path,
-        date(2026, 8, 7),
+    path = consolidated_parquet_path(tmp_path)
+    path.write_bytes(b"not parquet")
+    inspection = inspect_parquet_file(path)
+    assert inspection.exists
+    assert not inspection.valid
+    assert "cannot be read" in (inspection.error or "")
+
+
+def test_missing_required_metadata_is_corrupt(tmp_path):
+    source = _source(tmp_path, date(2026, 8, 7), ("AAA",))
+    result = write_consolidated_parquet((source,), tmp_path / "parquet")
+    table = pq.read_table(result.path).replace_schema_metadata(None)
+    pq.write_table(table, result.path, compression="zstd")
+
+    inspection = inspect_parquet_file(result.path)
+    assert not inspection.valid
+    assert "metadata" in (inspection.error or "")
+
+
+def test_repeated_build_is_byte_deterministic(tmp_path):
+    sources = (
+        _source(tmp_path, date(2026, 8, 8), ("ZZZ", "AAA")),
+        _source(tmp_path, date(2026, 8, 7), ("BBB",)),
     )
+    first = write_consolidated_parquet(sources, tmp_path / "first")
+    second = write_consolidated_parquet(reversed(sources), tmp_path / "second")
 
-    path.parent.mkdir(parents=True)
-    path.write_bytes(b"not parquet data")
-
-    inspection = inspect_parquet_file(
-        path,
-        expected_market_date=date(2026, 8, 7),
-    )
-
-    assert inspection.exists is True
-    assert inspection.valid is False
+    assert first.checksum == second.checksum
+    assert first.path.read_bytes() == second.path.read_bytes()
 
 
-def test_wrong_expected_source_checksum_is_stale(tmp_path):
-    source = tmp_path / "market_2026-08-07.csv"
+def test_atomic_failure_preserves_previous_final_and_cleans_temp(tmp_path, monkeypatch):
+    source = _source(tmp_path, date(2026, 8, 7), ("AAA",))
     output = tmp_path / "parquet"
+    first = write_consolidated_parquet((source,), output)
+    before = first.path.read_bytes()
 
-    _write_source(source, (_row("AAA", 1),))
+    from psx_data_sync import parquet_store
 
-    result = write_parquet_partition(
-        date(2026, 8, 7),
-        source,
-        output,
-    )
+    def fail_write(*args, **kwargs):
+        raise OSError("disk full")
 
-    inspection = inspect_parquet_file(
-        result.path,
-        expected_market_date=date(2026, 8, 7),
-        expected_source_checksum="0" * 64,
-        expected_source_row_count=1,
-    )
+    monkeypatch.setattr(parquet_store, "_write_parquet_file", fail_write)
+    with pytest.raises(OSError, match="disk full"):
+        write_consolidated_parquet((source,), output)
 
-    assert inspection.valid is False
-    assert inspection.error == "Parquet source checksum is stale"
+    assert first.path.read_bytes() == before
+    assert not list(output.glob(".market.parquet.*.tmp"))
 
 
-def test_repeated_build_has_same_logical_contents(tmp_path):
-    source = tmp_path / "market_2026-08-07.csv"
+def test_atomic_replace_failure_preserves_previous_final(tmp_path, monkeypatch):
+    source = _source(tmp_path, date(2026, 8, 7), ("AAA",))
+    output = tmp_path / "parquet"
+    first = write_consolidated_parquet((source,), output)
+    before = first.path.read_bytes()
 
-    _write_source(
-        source,
-        (
-            _row("BBB", 1),
-            _row("AAA", 2),
-        ),
-    )
+    from psx_data_sync import parquet_store
 
-    first = write_parquet_partition(
-        date(2026, 8, 7),
-        source,
-        tmp_path / "first",
-    )
+    def fail_replace(*args, **kwargs):
+        raise OSError("replace failed")
 
-    second = write_parquet_partition(
-        date(2026, 8, 7),
-        source,
-        tmp_path / "second",
-    )
+    monkeypatch.setattr(parquet_store.os, "replace", fail_replace)
+    with pytest.raises(OSError, match="replace failed"):
+        write_consolidated_parquet((source,), output)
 
-    first_table = pq.read_table(first.path)
-    second_table = pq.read_table(second.path)
-
-    assert first_table.equals(second_table)
-    assert first.source_csv_checksum == second.source_csv_checksum
+    assert first.path.read_bytes() == before
+    assert not list(output.glob(".market.parquet.*.tmp"))

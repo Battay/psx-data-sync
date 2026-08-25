@@ -45,10 +45,8 @@ from .importer import (
     import_local_csv_directory,
 )
 from .parquet_sync import (
-    DateParquetSyncResult,
-    ParquetExportAction,
-    RangeParquetSyncResult,
-    sync_parquet_range,
+    ConsolidatedParquetSyncResult,
+    sync_consolidated_parquet,
 )
 from .state_db import AsyncStateRepository, StateDatabaseError, StateRepository
 from .synchronizer import (
@@ -888,144 +886,59 @@ def _render_parquet_error(
     console.print(f"[bold red]{category}:[/bold red] {message}")
 
 
-def parquet_range_result_to_dict(result: RangeParquetSyncResult) -> dict[str, Any]:
+def parquet_result_to_dict(result: ConsolidatedParquetSyncResult) -> dict[str, Any]:
     return {
-        "start_date": result.start_date,
-        "end_date": result.end_date,
         "mode": "DRY_RUN" if result.dry_run else "APPLY",
-        "requested_count": result.requested_count,
-        "eligible_count": result.eligible_count,
-        "current_count": result.current_count,
-        "create_count": result.create_count,
-        "stale_count": result.stale_count,
-        "corrupt_count": result.corrupt_count,
-        "reindexed_count": result.reindexed_count,
-        "excluded_non_trading_count": result.excluded_non_trading_count,
-        "excluded_unresolved_count": result.excluded_unresolved_count,
-        "excluded_failure_count": result.excluded_failure_count,
-        "excluded_file_issue_count": result.excluded_file_issue_count,
-        "source_invalid_count": result.source_invalid_count,
-        "failed_count": result.failed_count,
-        "written_or_rebuilt_count": result.written_or_rebuilt_count,
-        "synchronized": result.synchronized,
-        "synchronization_percentage": round(result.synchronization_percentage, 2),
+        "source_dates": result.source_dates,
+        "source_rows": result.source_rows,
+        "status": result.status.value,
+        "planned_status": result.planned_status.value,
+        "action": result.action.value,
+        "rows_written": result.rows_written,
+        "output_path": str(result.output_path),
+        "source_identity": result.source_identity,
+        "legacy_partition_count": result.legacy_partition_count,
+        "file_size": result.file_size,
+        "last_build": result.last_build,
+        "rebuild": result.rebuild,
         "duration_ms": round(result.duration_ms, 2),
-        "results": [
-            {
-                "market_date": r.market_date,
-                "source_status": r.source_status.value if r.source_status else None,
-                "action": r.action.value if hasattr(r.action, "value") else str(r.action),
-                "export_status_before": (
-                    r.export_status_before.value if r.export_status_before else None
-                ),
-                "export_status_planned": (
-                    r.export_status_planned.value if r.export_status_planned else None
-                ),
-                "export_status_after": (
-                    r.export_status_after.value if r.export_status_after else None
-                ),
-                "eligible": r.eligible,
-                "source_csv_path": str(r.source_csv_path) if r.source_csv_path else None,
-                "source_checksum": r.source_checksum,
-                "source_row_count": r.source_row_count,
-                "parquet_path": str(r.parquet_path) if r.parquet_path else None,
-                "parquet_checksum": r.parquet_checksum,
-                "parquet_row_count": r.parquet_row_count,
-                "dry_run": r.dry_run,
-                "rebuilt_or_written": r.rebuilt_or_written,
-                "synchronized": r.synchronized,
-                "warnings": list(r.warnings),
-                "error": r.error,
-            }
-            for r in result.results
-        ],
-        "warnings": list(result.warnings),
+        "errors": list(result.errors),
     }
 
 
-def render_parquet_range_result(result: RangeParquetSyncResult) -> None:
+def render_parquet_result(result: ConsolidatedParquetSyncResult) -> None:
     mode_str = "DRY_RUN (planning only)" if result.dry_run else "APPLY (actual export)"
-    console.print(
-        f"[bold]PSX Data Sync — Parquet Export[/bold] ({result.start_date} → {result.end_date})\n"
-    )
+    console.print("[bold]PSX Data Sync — Consolidated Parquet Export[/bold]\n")
     table = Table.grid(padding=(0, 2))
     table.add_column(style="bold")
     table.add_column(justify="right")
 
     table.add_row("Mode:", mode_str)
-    table.add_row("Requested dates:", f"{result.requested_count:,}")
-    table.add_row("Eligible dates:", f"{result.eligible_count:,}")
-    table.add_row("Current (no-op):", f"{result.current_count:,}")
-    table.add_row("Create (new):", f"{result.create_count:,}")
-    table.add_row("Stale (rebuild):", f"{result.stale_count:,}")
-    table.add_row("Corrupt (rebuild):", f"{result.corrupt_count:,}")
-    table.add_row("Reindex:", f"{result.reindexed_count:,}")
-    table.add_row("Excluded non-trading:", f"{result.excluded_non_trading_count:,}")
-    table.add_row("Excluded unresolved:", f"{result.excluded_unresolved_count:,}")
-    table.add_row("Excluded failures:", f"{result.excluded_failure_count:,}")
-    table.add_row("Excluded file issues:", f"{result.excluded_file_issue_count:,}")
-    table.add_row("Source invalid:", f"{result.source_invalid_count:,}")
-    table.add_row("Failed:", f"{result.failed_count:,}")
-    table.add_row("Written / rebuilt:", f"{result.written_or_rebuilt_count:,}")
-    table.add_row("Synchronization percentage:", f"{result.synchronization_percentage:.1f}%")
-    table.add_row("Synchronized:", "Yes" if result.synchronized else "No")
+    table.add_row("Verified source dates:", f"{result.source_dates:,}")
+    table.add_row("Verified source rows:", f"{result.source_rows:,}")
+    table.add_row("Status:", result.status.value)
+    table.add_row("Planned status:", result.planned_status.value)
+    table.add_row("Action:", result.action.value)
+    table.add_row("Rows written:", f"{result.rows_written:,}")
+    table.add_row("Output path:", str(result.output_path))
+    table.add_row("Source identity:", result.source_identity or "—")
+    table.add_row("Legacy partitions:", f"{result.legacy_partition_count:,}")
+    file_size = f"{result.file_size:,} bytes" if result.file_size is not None else "—"
+    table.add_row("File size:", file_size)
+    table.add_row("Last build:", result.last_build or "—")
     table.add_row("Duration:", f"{result.duration_ms:.2f} ms")
     console.print(table)
-
-    if result.results:
-        details = Table(title="Per-date Parquet status")
-        details.add_column("Date")
-        details.add_column("Source Status")
-        details.add_column("Action")
-        details.add_column("Before")
-        details.add_column("After / Planned")
-        details.add_column("Written", justify="center")
-
-        for item in result.results:
-            details.add_row(
-                item.market_date,
-                item.source_status.value if item.source_status else "—",
-                item.action.value if hasattr(item.action, "value") else str(item.action),
-                item.export_status_before.value if item.export_status_before else "—",
-                (
-                    (item.export_status_after.value if item.export_status_after else "—")
-                    if not result.dry_run
-                    else (
-                        item.export_status_planned.value
-                        if item.export_status_planned
-                        else "—"
-                    )
-                ),
-                "✓" if item.rebuilt_or_written else "—",
-            )
-        console.print("\n", details)
+    for error in result.errors:
+        console.print(f"[red]Error:[/red] {error}")
 
 
 @app.command("export-parquet")
 def export_parquet_command(
-    start_date: Annotated[
-        str,
-        typer.Option(
-            "--start",
-            "-s",
-            help="Inclusive first date in YYYY-MM-DD format.",
-            metavar="YYYY-MM-DD",
-        ),
-    ],
-    end_date: Annotated[
-        str,
-        typer.Option(
-            "--end",
-            "-e",
-            help="Inclusive final date in YYYY-MM-DD format.",
-            metavar="YYYY-MM-DD",
-        ),
-    ],
     apply_changes: Annotated[
         bool,
         typer.Option(
             "--apply",
-            help="Apply Parquet exports and database state updates.",
+            help="Build or rebuild the consolidated Parquet file.",
         ),
     ] = False,
     dry_run: Annotated[
@@ -1039,7 +952,7 @@ def export_parquet_command(
         bool,
         typer.Option(
             "--rebuild",
-            help="Force regeneration of current Parquet partitions (requires --apply).",
+            help="Force regeneration of the current consolidated file (requires --apply).",
         ),
     ] = False,
     json_output: Annotated[
@@ -1050,18 +963,12 @@ def export_parquet_command(
         ),
     ] = False,
 ) -> None:
-    """Synchronize derived Parquet partitions for a date range."""
+    """Synchronize one Parquet file from every verified canonical CSV."""
 
-    try:
-        generate_date_range(start_date, end_date)
-    except ValueError as exc:
-        _render_parquet_error("Input error", str(exc), json_output=json_output)
-        raise typer.Exit(code=2) from exc
-
-    if rebuild and not apply_changes:
+    if rebuild and (not apply_changes or dry_run):
         _render_parquet_error(
             "Input error",
-            "--rebuild requires --apply",
+            "--rebuild requires --apply without --dry-run",
             json_output=json_output,
         )
         raise typer.Exit(code=2)
@@ -1080,10 +987,8 @@ def export_parquet_command(
 
     try:
         repository = _repository_from_settings(settings)
-        result = sync_parquet_range(
+        result = sync_consolidated_parquet(
             repository,
-            start_date,
-            end_date,
             output_root=settings.raw_output_dir.parent / "parquet",
             dry_run=effective_dry_run,
             rebuild=rebuild,
@@ -1106,15 +1011,17 @@ def export_parquet_command(
     if json_output:
         typer.echo(
             json.dumps(
-                parquet_range_result_to_dict(result),
+                parquet_result_to_dict(result),
                 indent=2,
                 sort_keys=True,
             )
         )
     else:
-        render_parquet_range_result(result)
+        render_parquet_result(result)
 
-    if not result.synchronized:
+    # MISSING/STALE/CORRUPT are successful dry-run findings. Apply failures and
+    # invalid verified sources remain non-zero domain outcomes.
+    if result.errors or (not result.dry_run and not result.synchronized):
         raise typer.Exit(code=3)
 
 

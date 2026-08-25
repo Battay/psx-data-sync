@@ -139,8 +139,8 @@ class DashboardWidget(QWidget):
 
         main_layout.addLayout(grid_layout)
 
-        # Parquet Export State Box
-        parquet_group = QGroupBox("Parquet Partition States")
+        # Historical per-date export records are retained for migration audit.
+        parquet_group = QGroupBox("Legacy Per-Date Parquet Records")
         parquet_layout = QGridLayout(parquet_group)
         parquet_layout.setSpacing(12)
 
