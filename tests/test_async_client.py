@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import date
 
 import httpx
@@ -10,13 +11,24 @@ from psx_data_sync.config import Settings
 from psx_data_sync.state import ClientFailureKind
 
 
+BOOTSTRAP_PAGE = b'<script>window.__ps = {"_k":"async-request-id"};</script>'
+
+
 @pytest.mark.asyncio
 async def test_async_client_reuses_one_session_for_multiple_dates(
     fixture_bytes,
 ) -> None:
     bodies: list[bytes] = []
+    bootstrap_requests = 0
 
     async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal bootstrap_requests
+        if request.method == "GET":
+            bootstrap_requests += 1
+            await asyncio.sleep(0)
+            return httpx.Response(200, content=BOOTSTRAP_PAGE)
+        assert request.headers["x-requested-with"] == "XMLHttpRequest"
+        assert request.headers["x-req-id"] == "async-request-id"
         bodies.append(request.content)
         return httpx.Response(200, content=fixture_bytes("valid_market.html"))
 
@@ -24,17 +36,22 @@ async def test_async_client_reuses_one_session_for_multiple_dates(
     client = AsyncPSXClient(Settings(), workers=2, http_client=http_client)
 
     async with client:
-        await client.fetch(date(2026, 8, 4))
-        await client.fetch(date(2026, 8, 5))
+        await asyncio.gather(
+            client.fetch(date(2026, 8, 4)),
+            client.fetch(date(2026, 8, 5)),
+        )
 
-    assert bodies == [b"date=2026-08-04", b"date=2026-08-05"]
+    assert sorted(bodies) == [b"date=2026-08-04", b"date=2026-08-05"]
+    assert bootstrap_requests == 1
     assert client.is_closed
     assert http_client.is_closed
 
 
 @pytest.mark.asyncio
 async def test_async_client_records_numeric_retry_after() -> None:
-    async def handler(_: httpx.Request) -> httpx.Response:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return httpx.Response(200, content=BOOTSTRAP_PAGE)
         return httpx.Response(429, text="slow down", headers={"Retry-After": "2.5"})
 
     http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
@@ -52,6 +69,8 @@ async def test_async_client_records_numeric_retry_after() -> None:
 @pytest.mark.asyncio
 async def test_async_timeout_is_retryable() -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return httpx.Response(200, content=BOOTSTRAP_PAGE)
         raise httpx.ReadTimeout("too slow", request=request)
 
     http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))

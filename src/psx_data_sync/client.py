@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 import math
+import re
 from datetime import date, datetime, timezone
 from email.utils import parsedate_to_datetime
 
@@ -14,6 +17,13 @@ from .state import ClientFailureKind, FetchResponse
 
 
 logger = logging.getLogger(__name__)
+
+
+_PAGE_SETTINGS_PATTERN = re.compile(
+    rb"window\.__ps\s*=\s*(\{.*?\})\s*;",
+    re.DOTALL,
+)
+_AJAX_HEADER = {"X-Requested-With": "XMLHttpRequest"}
 
 
 class PSXClientError(RuntimeError):
@@ -95,6 +105,29 @@ def _classify_response(response: httpx.Response) -> FetchResponse:
     return FetchResponse(status_code=status, content=response.content)
 
 
+def _request_id_from_page(response: httpx.Response) -> str:
+    """Extract the public page key that PSX requires on historical AJAX calls."""
+
+    classified = _classify_response(response)
+    match = _PAGE_SETTINGS_PATTERN.search(classified.content)
+    if match is not None:
+        try:
+            page_settings = json.loads(match.group(1))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            page_settings = None
+        if isinstance(page_settings, dict):
+            request_id = page_settings.get("_k")
+            if isinstance(request_id, str) and request_id:
+                return request_id
+    raise PSXClientError(
+        "PSX Historical Data page did not provide a request key",
+        kind=ClientFailureKind.HTTP,
+        retryable=True,
+        http_status=response.status_code,
+        response_bytes=len(response.content),
+    )
+
+
 class PSXClient:
     """Connection-pooled, injectable client for one or more PSX requests."""
 
@@ -106,6 +139,7 @@ class PSXClient:
     ) -> None:
         self.settings = settings
         self._owns_client = http_client is None
+        self._request_id: str | None = None
         self._client = http_client or httpx.Client(
             timeout=httpx.Timeout(
                 settings.request_timeout_seconds,
@@ -117,19 +151,43 @@ class PSXClient:
             },
         )
 
+    def _initialize(self) -> None:
+        if self._request_id is not None:
+            return
+        try:
+            response = self._client.get(self.settings.historical_url)
+        except httpx.TimeoutException as exc:
+            raise PSXClientError(
+                f"PSX request timed out: {exc}",
+                kind=ClientFailureKind.TIMEOUT,
+                retryable=True,
+            ) from exc
+        except httpx.RequestError as exc:
+            raise PSXClientError(
+                f"PSX connection failed: {exc}",
+                kind=ClientFailureKind.CONNECTION,
+                retryable=True,
+            ) from exc
+        self._request_id = _request_id_from_page(response)
+
     def fetch(self, requested_date: date) -> FetchResponse:
         """POST one ISO date and classify HTTP/transport failures."""
 
         iso_date = requested_date.isoformat()
         try:
+            self._initialize()
             response = self._client.post(
                 self.settings.historical_url,
                 data={"date": iso_date},
                 headers={
                     "Accept": "text/html,application/xhtml+xml",
                     "User-Agent": self.settings.user_agent,
+                    **_AJAX_HEADER,
+                    "X-Req-Id": self._request_id,
                 },
             )
+        except PSXClientError:
+            raise
         except httpx.TimeoutException as exc:
             raise PSXClientError(
                 f"PSX request timed out: {exc}",
@@ -179,6 +237,8 @@ class AsyncPSXClient:
             )
         self.settings = settings
         self.workers = workers
+        self._request_id: str | None = None
+        self._initialize_lock = asyncio.Lock()
         self._client = http_client or httpx.AsyncClient(
             timeout=httpx.Timeout(
                 settings.request_timeout_seconds,
@@ -195,17 +255,44 @@ class AsyncPSXClient:
         )
         self._closed = False
 
+    async def _initialize(self) -> None:
+        if self._request_id is not None:
+            return
+        async with self._initialize_lock:
+            if self._request_id is not None:
+                return
+            try:
+                response = await self._client.get(self.settings.historical_url)
+            except httpx.TimeoutException as exc:
+                raise PSXClientError(
+                    f"PSX request timed out: {exc}",
+                    kind=ClientFailureKind.TIMEOUT,
+                    retryable=True,
+                ) from exc
+            except httpx.RequestError as exc:
+                raise PSXClientError(
+                    f"PSX connection failed: {exc}",
+                    kind=ClientFailureKind.CONNECTION,
+                    retryable=True,
+                ) from exc
+            self._request_id = _request_id_from_page(response)
+
     async def fetch(self, requested_date: date) -> FetchResponse:
         iso_date = requested_date.isoformat()
         try:
+            await self._initialize()
             response = await self._client.post(
                 self.settings.historical_url,
                 data={"date": iso_date},
                 headers={
                     "Accept": "text/html,application/xhtml+xml",
                     "User-Agent": self.settings.user_agent,
+                    **_AJAX_HEADER,
+                    "X-Req-Id": self._request_id,
                 },
             )
+        except PSXClientError:
+            raise
         except httpx.TimeoutException as exc:
             raise PSXClientError(
                 f"PSX request timed out: {exc}",

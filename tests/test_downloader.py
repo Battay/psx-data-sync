@@ -4,7 +4,9 @@ from collections.abc import Iterable
 from datetime import date
 from pathlib import Path
 
-from psx_data_sync.client import PSXClientError
+import httpx
+
+from psx_data_sync.client import PSXClient, PSXClientError
 from psx_data_sync.config import Settings
 from psx_data_sync.downloader import SingleDateDownloader, validate_requested_date
 from psx_data_sync.exporter import save_canonical_csv
@@ -200,3 +202,23 @@ def test_non_retryable_http_error_stops_immediately(tmp_path: Path) -> None:
     assert result.status is DownloadStatus.HTTP_FAILURE
     assert result.attempts == 1
     assert result.http_status == 404
+
+
+def test_genuine_post_404_remains_http_failure(tmp_path: Path) -> None:
+    bootstrap_page = b'<script>window.__ps = {"_k":"test-request-id"};</script>'
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return httpx.Response(200, content=bootstrap_page)
+        return httpx.Response(404, text="not found")
+
+    configured = settings(tmp_path)
+    http_client = httpx.Client(transport=httpx.MockTransport(handler))
+    client = PSXClient(configured, http_client=http_client)
+
+    result = SingleDateDownloader(configured, client).download("2026-08-05")
+
+    assert result.status is DownloadStatus.HTTP_FAILURE
+    assert result.attempts == 1
+    assert result.http_status == 404
+    http_client.close()
